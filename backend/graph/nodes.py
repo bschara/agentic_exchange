@@ -199,6 +199,21 @@ def observe_node(state: AgentState) -> AgentState:
 
 
 def reason_node(state: AgentState) -> AgentState:
+    from agents.orchestrator import _global_coordinator
+
+    # When AgentCoordinator is live, all decisions come from Somnia's on-chain LLM —
+    # skip Claude entirely. The actual BUY/SELL/HOLD decision happens asynchronously
+    # via the on-chain callback after validator consensus.
+    if _global_coordinator:
+        return {
+            **state,
+            "reasoning": (
+                f"⬡ Somnia on-chain LLM agent active — {state['agent_name']} decision "
+                f"delegated to validator consensus (loop #{state.get('loop_count', 0)})"
+            ),
+        }
+
+    # Fallback: Claude reasoning (simulation mode or no coordinator configured)
     system_prompt = SYSTEM_PROMPTS.get(state["agent_id"], "You are a trading agent. Return a JSON decision.")
     position_desc = f"{state['current_position']:+.3f} ({state['position_side']})" if state.get("current_position") else "0.000 (FLAT)"
 
@@ -237,7 +252,7 @@ def decide_node(state: AgentState) -> AgentState:
 
 
 def execute_node(state: AgentState) -> AgentState:
-    from agents.orchestrator import _global_exchange
+    from agents.orchestrator import _global_exchange, _global_coordinator
 
     decision = state.get("decision", {"action": "hold", "params": {}})
     action = decision.get("action", "hold")
@@ -245,12 +260,23 @@ def execute_node(state: AgentState) -> AgentState:
 
     async def _execute():
         exchange = _global_exchange
+        coordinator = _global_coordinator
         tx_hash = None
         error = None
         success = False
+        used_somnia_agent = False
 
         try:
-            if action == "place_order" and exchange:
+            if coordinator:
+                # Contract is self-re-triggering after each handleDecision() callback.
+                # Orchestrator fires one initial triggerAgentDecision() per agent on startup.
+                # Nothing to do here — carry forward last known tx hash for the dashboard.
+                tx_hash = state.get("last_tx_hash")
+                success = True
+                used_somnia_agent = True
+
+            elif action == "place_order" and exchange:
+                # Fallback: Claude decided, execute directly on Exchange
                 result = await exchange.place_order(
                     agent_pk=state["private_key"],
                     is_buy=params.get("is_buy", True),
@@ -276,13 +302,13 @@ def execute_node(state: AgentState) -> AgentState:
             error = str(e)
             logger.error(f"Execute error for {state['agent_id']}: {e}")
 
-        return tx_hash, error, success
+        return tx_hash, error, success, used_somnia_agent
 
     try:
         loop = asyncio.get_event_loop()
-        tx_hash, error, success = loop.run_until_complete(_execute())
+        tx_hash, error, success, used_somnia_agent = loop.run_until_complete(_execute())
     except RuntimeError:
-        tx_hash, error, success = asyncio.run(_execute())
+        tx_hash, error, success, used_somnia_agent = asyncio.run(_execute())
 
     # Update position tracking
     new_position = state.get("current_position", 0.0)
@@ -315,6 +341,7 @@ def execute_node(state: AgentState) -> AgentState:
         "last_tx_error": error,
         "execution_success": success,
         "last_action": action,
+        "used_somnia_agent": used_somnia_agent,
         "current_position": round(new_position, 4),
         "position_side": new_side,
         "pnl_session": round(new_pnl, 6),
@@ -353,6 +380,7 @@ def broadcast_node(state: AgentState) -> AgentState:
                 "reasoning": state.get("reasoning", ""),
                 "reasoning_summary": summary,
                 "loop_count": state.get("loop_count", 0),
+                "used_somnia_agent": state.get("used_somnia_agent", False),
                 "timestamp": time.time(),
             },
         }
@@ -374,23 +402,45 @@ def broadcast_node(state: AgentState) -> AgentState:
         }
         await hub.broadcast(feed_item)
 
-        # Risk manager warning propagation
-        if state["agent_id"] == "risk_manager" and action == "broadcast_warning":
-            warning_msg = params.get("message", summary)
-            await bus.set_agent_warning("risk_manager", warning_msg)
-            risk_warning = {
-                "type": "risk_warning",
-                "data": {
-                    "from_agent": "risk_manager",
-                    "severity": params.get("severity", "MEDIUM"),
-                    "warning_type": "vol_spike",
-                    "message": warning_msg,
-                    "timestamp": time.time(),
-                },
-            }
-            await hub.broadcast(risk_warning)
-        elif state["agent_id"] == "risk_manager" and "stable" in summary.lower():
-            await bus.clear_agent_warning("risk_manager")
+        # Risk-Shield warning propagation.
+        # Somnia-native path: threshold-based (no Claude). Claude path: parse decision.
+        if state["agent_id"] == "risk_manager":
+            from agents.orchestrator import _global_coordinator
+            if _global_coordinator:
+                # Rule-based: volatility thresholds drive warnings without LLM
+                vol = state.get("volatility_estimate", 0.0)
+                if vol > 3.0:
+                    severity = "HIGH" if vol > 4.0 else "MEDIUM"
+                    warning_msg = f"Volatility {vol:.1f}% — Somnia agent flagging elevated risk"
+                    await bus.set_agent_warning("risk_manager", warning_msg)
+                    await hub.broadcast({
+                        "type": "risk_warning",
+                        "data": {
+                            "from_agent": "risk_manager",
+                            "severity": severity,
+                            "warning_type": "vol_spike",
+                            "message": warning_msg,
+                            "timestamp": time.time(),
+                        },
+                    })
+                elif vol < 2.0:
+                    await bus.clear_agent_warning("risk_manager")
+            elif action == "broadcast_warning":
+                # Claude fallback path
+                warning_msg = params.get("message", summary)
+                await bus.set_agent_warning("risk_manager", warning_msg)
+                await hub.broadcast({
+                    "type": "risk_warning",
+                    "data": {
+                        "from_agent": "risk_manager",
+                        "severity": params.get("severity", "MEDIUM"),
+                        "warning_type": "vol_spike",
+                        "message": warning_msg,
+                        "timestamp": time.time(),
+                    },
+                })
+            elif "stable" in summary.lower():
+                await bus.clear_agent_warning("risk_manager")
 
         await asyncio.sleep(settings.agent_loop_interval_seconds)
 

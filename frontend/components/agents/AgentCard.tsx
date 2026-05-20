@@ -49,7 +49,19 @@ export function AgentCard({ agent }: { agent: AgentState }) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-lg">{AGENT_ICONS[agent.agent_id]}</span>
-          <span className="text-sm font-bold text-white">{agent.agent_name}</span>
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm font-bold text-white">{agent.agent_name}</span>
+            <span
+              title="Decisions made by Somnia's on-chain LLM validator consensus"
+              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded w-fit transition-colors ${
+                agent.used_somnia_agent
+                  ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40'
+                  : 'bg-white/5 text-gray-600 border border-white/10'
+              }`}
+            >
+              {agent.used_somnia_agent ? '⬡ ON-CHAIN LLM' : '⬡ SOMNIA AGENT'}
+            </span>
+          </div>
         </div>
         <AgentStatusBadge status={agent.status} />
       </div>

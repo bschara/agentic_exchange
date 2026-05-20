@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     exchange_address: str = "0x0000000000000000000000000000000000000000"
     agent_registry_address: str = "0x0000000000000000000000000000000000000000"
     treasury_address: str = "0x0000000000000000000000000000000000000000"
+    agent_coordinator_address: str = "0x0000000000000000000000000000000000000000"
 
     # Agent behavior
     agent_loop_interval_seconds: float = 8.0

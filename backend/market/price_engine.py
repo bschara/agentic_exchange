@@ -54,6 +54,8 @@ class PriceEngine:
         self._vol_multiplier_until = 0.0
         self._ohlcv = OHLCVBuilder(bar_seconds=5)
         self.history: deque = deque(maxlen=500)
+        # Set to True once on-chain trades are available — price anchors to chain
+        self.using_chain_price: bool = False
 
     def next_price(self) -> float:
         vol = self.volatility * self._effective_multiplier()
@@ -111,3 +113,15 @@ class PriceEngine:
     def get_recent_closes(self, n: int = 20) -> list[float]:
         bars = list(self.history)
         return [b["close"] for b in bars[-n:]]
+
+    def set_chain_price(self, chain_price: float):
+        """
+        Called by the orchestrator when a real TradeExecuted event is seen.
+        Anchors GBM to the on-chain price so the simulation stays coherent
+        with actual matched trades.
+        """
+        if chain_price > 0:
+            self.price = chain_price
+            self.using_chain_price = True
+            # Tick the OHLCV builder so the candle reflects the real price
+            self._ohlcv.tick(chain_price, 0)

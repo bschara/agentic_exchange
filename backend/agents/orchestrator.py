@@ -6,7 +6,7 @@ from typing import Optional
 from config import settings
 from market.price_engine import PriceEngine
 from market.state_bus import MarketStateBus
-from blockchain.contracts import ExchangeContract, TreasuryContract
+from blockchain.contracts import ExchangeContract, TreasuryContract, AgentCoordinatorContract
 from api.websocket_hub import ConnectionManager
 from agents.base_agent import BaseAgent
 
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _global_state_bus: Optional[MarketStateBus] = None
 _global_exchange: Optional[ExchangeContract] = None
 _global_treasury: Optional[TreasuryContract] = None
+_global_coordinator: Optional[AgentCoordinatorContract] = None
 _global_hub: Optional[ConnectionManager] = None
 
 
@@ -51,14 +52,21 @@ class AgentOrchestrator:
         self._exchange: Optional[ExchangeContract] = None
         self._treasury: Optional[TreasuryContract] = None
 
+        self._coordinator: Optional[AgentCoordinatorContract] = None
+
         if (settings.exchange_address != "0x0000000000000000000000000000000000000000" and
                 not settings.simulation_mode):
             self._exchange = ExchangeContract(settings.exchange_address, settings.somnia_rpc_url)
             self._treasury = TreasuryContract(settings.treasury_address, settings.somnia_rpc_url)
+            if settings.agent_coordinator_address != "0x0000000000000000000000000000000000000000":
+                self._coordinator = AgentCoordinatorContract(
+                    settings.agent_coordinator_address, settings.somnia_rpc_url
+                )
 
-        global _global_exchange, _global_treasury
+        global _global_exchange, _global_treasury, _global_coordinator
         _global_exchange = self._exchange
         _global_treasury = self._treasury
+        _global_coordinator = self._coordinator
 
         # Agents
         self.agents: dict[str, BaseAgent] = {}
@@ -80,17 +88,36 @@ class AgentOrchestrator:
     async def start_all(self):
         logger.info("Starting orchestrator...")
 
-        # 1. Price loop
+        # 1. Price loop (GBM simulation, anchored to chain when trades exist)
         self._price_task = asyncio.create_task(self._price_loop())
 
-        # 2. Snapshot broadcast loop
+        # 2. Chain price sync — polls Exchange.getLastTradePrice() every 5s
+        self._chain_sync_task = asyncio.create_task(self._chain_price_sync_loop())
+
+        # 3. Snapshot broadcast loop
         self._snapshot_task = asyncio.create_task(self._snapshot_broadcast_loop())
 
-        # 3. Start agents with staggered timing
+        # 4. Start agents with staggered timing
         for i, (agent_id, agent) in enumerate(self.agents.items()):
             await asyncio.sleep(2.0)  # stagger by 2s to offset Anthropic API calls
             self._tasks[agent_id] = asyncio.create_task(agent.run())
             logger.info(f"Started agent: {agent.agent_name}")
+
+        # 5. Fire one initial on-chain trigger per agent — after this the contract
+        #    self-re-triggers via handleDecision() → _retrigger() indefinitely.
+        if self._coordinator:
+            logger.info("Firing initial on-chain triggers (agents will self-loop after this)...")
+            for cfg in AGENT_CONFIGS:
+                pk = getattr(settings, cfg["pk_key"])
+                try:
+                    result = await self._coordinator.trigger_decision(
+                        agent_pk=pk,
+                        agent_id=cfg["id"],
+                    )
+                    logger.info(f"  {cfg['id']} initial trigger: {result.get('tx_hash')}")
+                except Exception as e:
+                    logger.error(f"  {cfg['id']} initial trigger failed: {e}")
+                await asyncio.sleep(1.0)
 
         logger.info("All agents started.")
 
@@ -99,10 +126,10 @@ class AgentOrchestrator:
             agent.stop()
         for task in self._tasks.values():
             task.cancel()
-        if self._price_task:
-            self._price_task.cancel()
-        if self._snapshot_task:
-            self._snapshot_task.cancel()
+        for task in [self._price_task, self._snapshot_task,
+                     getattr(self, "_chain_sync_task", None)]:
+            if task:
+                task.cancel()
 
     async def inject_event(self, event_type: str, params: dict):
         price_before = self._price_engine.price
@@ -176,6 +203,29 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.error(f"Snapshot broadcast error: {e}")
             await asyncio.sleep(2.0)
+
+    async def _chain_price_sync_loop(self):
+        """
+        Polls Exchange.getLastTradePrice() every 5s. When real on-chain trades
+        exist, anchors the GBM simulation to the actual matched price so the
+        chart reflects true price discovery rather than pure simulation.
+        """
+        while True:
+            try:
+                if self._exchange:
+                    chain_price = await self._exchange.get_last_trade_price()
+                    if chain_price > 0:
+                        self._price_engine.set_chain_price(chain_price)
+                        # Also update spread from real on-chain order book
+                        bid, bid_exists = await self._exchange.get_best_bid()
+                        ask, ask_exists = await self._exchange.get_best_ask()
+                        if bid_exists and ask_exists:
+                            self._state_bus.synthesize_order_book(
+                                (bid + ask) / 2
+                            )
+            except Exception as e:
+                logger.debug(f"Chain price sync: {e}")
+            await asyncio.sleep(5.0)
 
     def get_agent_states(self) -> dict:
         return {a_id: a.get_state_summary() for a_id, a in self.agents.items()}

@@ -1,6 +1,6 @@
 # Contracts — Agentic Exchange
 
-Three Solidity contracts on Somnia testnet (chain 50312) recording every agent order and trade permanently onchain. No real token movement — purely an onchain audit trail for the demo.
+Four Solidity contracts on Somnia testnet (chain 50312). Exchange.sol is a real on-chain limit order book with automatic matching. AgentCoordinator.sol routes all 4 agents through Somnia's native LLM inference agent for on-chain validator consensus.
 
 ---
 
@@ -12,11 +12,12 @@ contracts/
 ├── package.json             # type: "module" (ESM), hardhat + ethers v6 deps
 ├── .env                     # Private keys — NOT committed (see .gitignore)
 ├── contracts/
-│   ├── Exchange.sol         # placeOrder / cancelOrder / executeTrade + events
+│   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
+│   ├── AgentCoordinator.sol # IAgentRequester integration — Somnia LLM for all 4 agents
 │   ├── AgentRegistry.sol    # Agent registration, reputation, trade count
 │   └── Treasury.sol         # Per-agent ETH balances (deposit / withdraw / allocate)
 ├── scripts/
-│   ├── deploy.js            # Deploys all 3 contracts → writes deployments/somnia-testnet.json
+│   ├── deploy.js            # Deploys all 4 contracts, sets on-chain system prompts, writes JSON
 │   ├── seed.js              # Registers 4 agents in registry, funds each in treasury
 │   └── verify.js            # Sanity check: reads agent list + balances from live contracts
 ├── deployments/
@@ -91,17 +92,23 @@ npx hardhat run scripts/deploy.js --network somnia
 Output:
 
 ```
-Deploying from: 0xAbCd...
-Exchange deployed:       0x1111...
-AgentRegistry deployed:  0x2222...
-Treasury deployed:       0x3333...
+Deploying contracts with: 0xAbCd...
+Exchange deployed to:          0x1111...
+AgentRegistry deployed to:     0x2222...
+Treasury deployed to:          0x3333...
+AgentCoordinator deployed to:  0x4444...
+System prompt set on-chain for market_maker
+System prompt set on-chain for momentum_trader
+System prompt set on-chain for arbitrage_agent
+System prompt set on-chain for risk_manager
+AgentCoordinator funded with 0.05 STT
 
-✓ Wrote deployments/somnia-testnet.json
-
-Copy these into backend/.env:
-  EXCHANGE_ADDRESS=0x1111...
-  AGENT_REGISTRY_ADDRESS=0x2222...
-  TREASURY_ADDRESS=0x3333...
+─── Add to backend/.env ───────────────────────────
+EXCHANGE_ADDRESS=0x1111...
+AGENT_REGISTRY_ADDRESS=0x2222...
+TREASURY_ADDRESS=0x3333...
+AGENT_COORDINATOR_ADDRESS=0x4444...
+───────────────────────────────────────────────────
 ```
 
 ### 6. Register agents and fund treasuries
@@ -130,7 +137,7 @@ Copy the printed env vars into `backend/.env`, then restart the backend with `./
 
 ### `Exchange.sol`
 
-Records buy/sell orders and matched trades. No actual token transfers.
+Real on-chain limit order book with automatic matching. Every `placeOrder()` call triggers `_matchOrder()` immediately — orders cross if a matching price exists.
 
 **Structs:**
 
@@ -140,7 +147,8 @@ struct Order {
     address agent;
     bool isBuy;        // true = buy order
     uint256 price;     // scaled 1e18
-    uint256 amount;    // scaled 1e18
+    uint256 amount;    // original amount, scaled 1e18
+    uint256 filled;    // amount matched so far, scaled 1e18
     uint256 timestamp;
     bool active;
 }
@@ -151,8 +159,8 @@ struct Trade {
     uint256 sellOrderId;
     address buyer;
     address seller;
-    uint256 price;     // executed at sell order price
-    uint256 amount;    // min(buyAmount, sellAmount)
+    uint256 price;     // maker's price (sell order price for buy takers)
+    uint256 amount;    // filled amount
     uint256 timestamp;
 }
 ```
@@ -160,20 +168,75 @@ struct Trade {
 **Functions:**
 | Function | Access | Description |
 |----------|--------|-------------|
-| `placeOrder(bool isBuy, uint256 price, uint256 amount)` | anyone | Creates order, returns `orderId` |
-| `cancelOrder(uint256 orderId)` | order creator | Marks order inactive |
-| `executeTrade(uint256 buyOrderId, uint256 sellOrderId)` | anyone | Matches two orders; requires `buyPrice >= sellPrice`; deactivates both |
+| `placeOrder(bool isBuy, uint256 price, uint256 amount)` | anyone | Creates order, runs `_matchOrder()`, returns `orderId`. Resting unmatched amount stays in book. |
+| `cancelOrder(uint256 orderId)` | order creator | Marks order inactive, removes from active book |
+| `getBestBid()` | view | Returns `(price, exists)` — highest active buy order price |
+| `getBestAsk()` | view | Returns `(price, exists)` — lowest active sell order price |
+| `getLastTradePrice()` | view | Price of the most recently matched fill (`0` if no fills yet) |
 | `getOrder(uint256 orderId)` | view | Returns `Order` struct |
 | `getTrade(uint256 tradeId)` | view | Returns `Trade` struct |
-| `getActiveOrders()` | view | Returns array of active order IDs |
+| `getActiveOrders()` | view | Returns combined array of active buy + sell order IDs |
+| `getActiveBuys()` | view | Returns active buy order IDs |
+| `getActiveSells()` | view | Returns active sell order IDs |
+
+State variables: `lastTradePrice` (public), `hasTraded` (public bool — true after first match).
 
 **Events:**
 
 ```solidity
 event OrderPlaced(uint256 indexed orderId, address indexed agent, bool isBuy, uint256 price, uint256 amount);
 event OrderCancelled(uint256 indexed orderId, address indexed agent);
-event TradeExecuted(uint256 indexed tradeId, uint256 buyOrderId, uint256 sellOrderId, address buyer, address seller, uint256 price, uint256 amount);
+event OrderFilled(uint256 indexed orderId, uint256 filledAmount, bool fullFill);
+event TradeExecuted(uint256 indexed tradeId, uint256 buyOrderId, uint256 sellOrderId,
+    address indexed buyer, address indexed seller, uint256 price, uint256 amount);
 ```
+
+**Matching logic:** `_matchOrder()` does an O(n) scan of `_activeSellIds` (for buy orders) or `_activeBuyIds` (for sell orders). Match condition: `buy.price >= sell.price`. Fill price = maker's price. Partial fills supported — remainder stays as resting order. `_removeAt()` swaps-and-pops for O(1) removal.
+
+---
+
+### `AgentCoordinator.sol`
+
+Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-triggers after every decision cycle — Python fires one `triggerAgentDecision()` per agent at startup; after that the loop runs entirely on-chain.
+
+**Key state:**
+- `systemPrompts` — `mapping(string => string)` keyed by agent ID; strategy-specific prompts set on-chain
+- `agentConfigs` — `mapping(string => AgentConfig)` — per-agent price URL, JSON selector, and decimal precision
+- `pendingPriceRequests` — maps `requestId` → `PriceRequest { agentId, exists }` (stage 1 in-flight)
+- `pendingLLMRequests` — maps `requestId` → `LLMRequest { agentId, fetchedPrice, exists }` (stage 2 in-flight)
+- `llmAgentId` — Somnia platform LLM agent ID (default `2`)
+- `jsonApiAgentId` — Somnia platform JSON API agent ID
+- `platform` — `IAgentRequester` at `0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776`
+- `exchange` — `IExchange` pointing to `Exchange.sol`
+
+**Functions:**
+| Function | Access | Description |
+|----------|--------|-------------|
+| `triggerAgentDecision(string agentId)` | anyone | **Step 1.** Fires JSON API price fetch via `platform.createRequest`. Called once per agent at startup by the Python orchestrator; after that `_retrigger()` calls it on-chain. |
+| `handlePriceData(requestId, responses, status, ...)` | platform only | **Step 2 callback.** Decodes fetched price, reads Exchange on-chain state, builds context string, fires LLM inference via `platform.createRequest`. |
+| `handleDecision(requestId, responses, status, ...)` | platform only | **Step 3 callback.** Decodes BUY/SELL/HOLD from validator consensus, calls `Exchange.placeOrder()`, then calls `_retrigger()` to start the next cycle. |
+| `_retrigger(agentId)` | internal | Checks balance ≥ `deposit × 2`, fires next JSON API fetch, or emits `LoopStopped`. |
+| `setAgentConfig(agentId, url, selector, decimals)` | owner | Sets price URL and JSON path for an agent |
+| `setSystemPrompt(string agentId, string prompt)` | owner | Stores strategy prompt on-chain for an agent |
+| `setLlmAgentId(uint256 id)` | owner | Updates the Somnia platform LLM agent ID |
+| `setJsonApiAgentId(uint256 id)` | owner | Updates the Somnia platform JSON API agent ID |
+| `fund()` | anyone (payable) | Adds STT to coordinator balance for inference deposits |
+| `withdraw()` | owner | Withdraws all coordinator STT balance |
+
+**Events:**
+
+```solidity
+event DecisionTriggered(uint256 indexed requestId, string agentId);
+event PriceFetchFailed(uint256 indexed requestId, string agentId);
+event LLMRequestFired(uint256 indexed llmRequestId, string agentId, uint256 fetchedPrice);
+event DecisionExecuted(uint256 indexed requestId, string agentId, string decision, uint256 price, uint256 orderId);
+event DecisionFailed(uint256 indexed requestId, string agentId, string reason);
+event LoopStopped(string agentId, string reason, uint256 balance);
+```
+
+`LoopStopped` fires when `_retrigger()` cannot proceed — either because the coordinator's STT balance is below `deposit × 2`, or because no `agentConfig` is registered for that agent ID. Monitor this event to know when to top up via `fund()`.
+
+**Deployment:** `deploy.js` automatically sets `systemPrompts` and `agentConfigs` for all 4 agents and funds the coordinator with 0.05 STT. Each full cycle (JSON fetch + LLM inference) consumes 2 deposits. Top up via `fund()` to keep agents running.
 
 ---
 
@@ -250,28 +313,42 @@ event Allocated(address indexed from, address indexed to, uint256 amount);
 ### `scripts/deploy.js`
 
 1. Gets deployer signer from hardhat
-2. Deploys `Exchange`, `AgentRegistry`, `Treasury` sequentially
-3. Reads compiled ABIs from `artifacts/`
-4. Writes `deployments/somnia-testnet.json` with addresses + ABIs
-5. Prints the exact env vars to copy into `backend/.env`
+2. Deploys `Exchange`, `AgentRegistry`, `Treasury`, `AgentCoordinator` sequentially
+3. Calls `AgentCoordinator.setSystemPrompt()` for all 4 agents (market_maker, momentum_trader, arbitrage_agent, risk_manager) — prompts stored on-chain
+4. Funds `AgentCoordinator` with 0.05 STT for LLM inference deposits
+5. Reads compiled ABIs from `artifacts/`
+6. Writes `deployments/somnia-testnet.json` with addresses + ABIs
+7. Prints the exact env vars to copy into `backend/.env` (including `AGENT_COORDINATOR_ADDRESS`)
 
 **Output file format** (`deployments/somnia-testnet.json`):
 
 ```json
 {
-  "network": "somnia-testnet",
   "chainId": 50312,
   "deployedAt": "2025-...",
   "deployer": "0x...",
   "contracts": {
-    "Exchange": { "address": "0x...", "abi": [...] },
-    "AgentRegistry": { "address": "0x...", "abi": [...] },
-    "Treasury": { "address": "0x...", "abi": [...] }
+    "Exchange":          { "address": "0x..." },
+    "AgentRegistry":     { "address": "0x..." },
+    "Treasury":          { "address": "0x..." },
+    "AgentCoordinator":  { "address": "0x..." }
+  },
+  "abis": {
+    "Exchange": [...],
+    "AgentRegistry": [...],
+    "Treasury": [...],
+    "AgentCoordinator": [...]
+  },
+  "meta": {
+    "somniaPlatform": "0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776",
+    "llmAgentId": "2"
   }
 }
 ```
 
 This file is tracked in git (no secrets — only addresses and ABIs). The backend reads it to initialize contract instances.
+
+**LLM Agent ID:** The platform LLM agent ID defaults to `2`. Confirm the current ID at `https://agents.somnia.network` and override at deploy time with `SOMNIA_LLM_AGENT_ID=<id> npx hardhat run scripts/deploy.js --network somnia`.
 
 ### `scripts/seed.js`
 

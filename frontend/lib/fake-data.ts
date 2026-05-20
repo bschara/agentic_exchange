@@ -72,6 +72,7 @@ export const FAKE_AGENTS: AgentState[] = [
     reasoning: 'Market conditions stable. Spread at 0.28%. Placing symmetric limit orders at ±0.15% from mid to capture flow. Volatility within normal range — maintaining standard spread.',
     reasoning_summary: 'Placed bid/ask around mid at standard spread',
     loop_count: 0,
+    used_somnia_agent: false,
     timestamp: now,
   },
   {
@@ -88,6 +89,7 @@ export const FAKE_AGENTS: AgentState[] = [
     reasoning: 'Detected 5-bar uptrend with increasing volume. Price broke above recent resistance. Entering long position with 0.5 ETH. Stop-loss mentally set at 1.5% below entry.',
     reasoning_summary: 'Long entry on 5-bar breakout with volume confirmation',
     loop_count: 0,
+    used_somnia_agent: false,
     timestamp: now,
   },
   {
@@ -104,6 +106,7 @@ export const FAKE_AGENTS: AgentState[] = [
     reasoning: 'Current spread is 0.28% — below my 0.5% threshold for arbitrage. No inefficiency to exploit. Monitoring for spread widening or pricing gaps. Holding flat.',
     reasoning_summary: 'Spread too tight for arbitrage — monitoring',
     loop_count: 0,
+    used_somnia_agent: false,
     timestamp: now,
   },
   {
@@ -120,6 +123,7 @@ export const FAKE_AGENTS: AgentState[] = [
     reasoning: 'Portfolio exposure within safe limits. Total position value: 18% of treasury. Volatility at 1.9% — normal range. No warnings needed. Maintaining small short hedge position.',
     reasoning_summary: 'Exposure healthy — maintaining short hedge',
     loop_count: 0,
+    used_somnia_agent: false,
     timestamp: now,
   },
 ];

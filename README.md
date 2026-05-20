@@ -9,13 +9,15 @@
 ![Hackathon](https://img.shields.io/badge/Somnia-Hackathon-22c55e?style=flat-square)
 
 **The demo answers one question:** Why does Somnia need to exist?  
-**Because autonomous AI agents need real-time onchain execution.** Traditional chains are too slow — 12-15s block times mean an agent loop takes 30+ seconds per decision. Somnia's sub-second finality makes 8-second autonomous loops possible.
+**Because autonomous AI agents need real-time onchain execution — and Somnia-native AI.** Traditional chains are too slow for 8-second agent loops. And no other chain lets AI decisions themselves be validated by a decentralized network. Somnia delivers both: sub-second finality and native on-chain LLM consensus via the Somnia Agent platform.
 
 ---
 
 ## What It Is
 
-Four AI agents (powered by Claude claude-sonnet-4-6) autonomously trade on the Somnia blockchain (chain 50312). Every decision is made by Claude, every trade is recorded permanently onchain. A live dashboard shows visible reasoning, real-time charts, event injection, and agent-to-agent coordination.
+Four AI agents autonomously trade on the Somnia blockchain (chain 50312). When deployed onchain, every trading decision is validated by Somnia's decentralized LLM inference agent — not an off-chain bot. Every order is matched by a real on-chain limit order book. A live dashboard shows visible reasoning, real-time charts, event injection, and agent-to-agent coordination.
+
+In simulation mode (no wallets required), agents fall back to Claude claude-sonnet-4-6 reasoning so the demo works anywhere.
 
 ---
 
@@ -32,12 +34,12 @@ observe → reason → decide → execute → broadcast
 | Node | What it does |
 |------|-------------|
 | **observe** | Reads price, order book, trend, volatility, and any warnings from Risk Manager via `MarketStateBus` |
-| **reason** | Sends market context to Claude claude-sonnet-4-6 with a strategy-specific system prompt. Claude returns a JSON decision block. |
-| **decide** | Parses Claude's JSON. Validates against risk limits. Falls back to `hold` if parse fails. |
-| **execute** | Submits onchain tx to `Exchange.sol` (`placeOrder` / `cancelOrder`). Skips gracefully if testnet is unreachable. |
-| **broadcast** | Sends `agent_update` WebSocket message to dashboard. Risk Manager additionally writes warnings to the shared state bus. |
+| **reason** | **Onchain mode:** returns a placeholder — the actual decision is made by Somnia's on-chain LLM validator consensus. **Simulation mode:** sends market context to Claude claude-sonnet-4-6 with a strategy-specific system prompt. |
+| **decide** | Parses decision, validates against risk limits. Falls back to `hold` if parse fails. |
+| **execute** | **Onchain mode:** no-op — the contract is self-re-triggering. On startup, the orchestrator fires one `triggerAgentDecision()` per agent; after that, `handleDecision()` calls `_retrigger()` to keep each agent's loop running entirely on-chain. **Simulation mode:** Claude output → direct `Exchange.placeOrder()`. |
+| **broadcast** | Sends `agent_update` WebSocket message to dashboard. Risk Manager writes threshold-based warnings to the shared state bus. |
 
-All 4 agents run the same graph — differentiated only by their strategy system prompt in `backend/graph/nodes.py`.
+All 4 agents run the same graph — differentiated by strategy-specific system prompts stored on-chain in `AgentCoordinator.systemPrompts`.
 
 ---
 
@@ -45,12 +47,14 @@ All 4 agents run the same graph — differentiated only by their strategy system
 
 | Agent | Name | Strategy | Triggers |
 |-------|------|----------|----------|
-| 🏦 Market Maker | MM-Prime | Places bid/ask, captures spread | Widens spread when volatility > 3% or Risk warning received |
+| ⚖️ Market Maker | MM-Prime | Places bid/ask, captures spread | Widens spread when volatility > 3% or Risk warning received |
 | 📈 Momentum Trader | Momentum-Alpha | Enters long/short on breakouts | 5-bar consecutive UP/DOWN trend → enter position |
-| 🔍 Arbitrage Agent | Arb-Scanner | Exploits pricing gaps | Bid-ask spread > 0.5% with no active orders → place order at midpoint |
-| 🛡️ Risk Manager | Risk-Shield | Monitors exposure, coordinates agents | Position > 40% of treasury → broadcasts reduce-size warning to all agents |
+| 🔍 Arbitrage Agent | Arb-Scanner | Exploits pricing gaps | Bid-ask spread > 0.5% → place order at midpoint |
+| 🛡️ Risk Manager | Risk-Shield | Monitors exposure, coordinates agents | Volatility > 3% → broadcasts reduce-size warning to all agents |
 
-**Agent coordination:** Risk-Shield writes warnings to a shared `MarketStateBus`. Every other agent reads these warnings in their `observe` step and passes them to Claude as context. This is the agent-to-agent communication layer.
+**All 4 agents are Somnia-native** when deployed: on startup the orchestrator fires one `triggerAgentDecision()` per agent. From that point the contract is fully self-sustaining — `handleDecision()` calls `_retrigger()` at the end of every cycle, keeping each agent's loop alive with no further Python involvement. If the coordinator runs out of STT, it emits `LoopStopped(agentId, reason, balance)` and halts gracefully. Claude claude-sonnet-4-6 is used only in simulation mode.
+
+**Agent coordination:** Risk-Shield writes volatility warnings to a shared `MarketStateBus`. Every other agent reads these warnings in their `observe` step. `decide_node` also enforces a 50% order-size reduction on any active warning, regardless of the LLM output.
 
 ---
 
@@ -58,38 +62,62 @@ All 4 agents run the same graph — differentiated only by their strategy system
 
 - **Frontend**: Next.js 14 + Tailwind CSS + TradingView Lightweight Charts v5 + Zustand
 - **Backend**: Python FastAPI + WebSockets + LangGraph + Anthropic SDK
-- **Contracts**: Solidity (Exchange, AgentRegistry, Treasury) on Somnia testnet
-- **AI**: Claude claude-sonnet-4-6 (400 tokens per reasoning step, strategy system prompts)
+- **Contracts**: Solidity (Exchange LOB, AgentCoordinator, AgentRegistry, Treasury) on Somnia testnet
+- **Onchain AI**: Somnia LLM Inference Agent via `IAgentRequester` — BUY/SELL/HOLD consensus from Somnia validators
+- **Simulation AI**: Claude claude-sonnet-4-6 (fallback when coordinator not configured)
 
 ---
 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   Somnia Blockchain (50312)                  │
-│       Exchange.sol · AgentRegistry.sol · Treasury.sol        │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ web3 txs (6 gwei hardcoded, per-wallet Lock)
-┌──────────────────────────▼──────────────────────────────────┐
-│                      FastAPI Backend                         │
-│  ┌──────────────┐   ┌──────────────────────────────────┐   │
-│  │ PriceEngine  │   │       4 × LangGraph Agent         │   │
-│  │   (GBM)      ├──►│  observe→reason→decide→execute    │   │
-│  └──────┬───────┘   │         →broadcast (8s loop)      │   │
-│         │           └──────────────┬─────────────────── ┘   │
-│  ┌──────▼────────────────────────┐ │                        │
-│  │        MarketStateBus         │◄┘  (warnings, events)   │
-│  │  price · order book · history │                          │
-│  │  agent warnings · events      ├──► WS broadcast (2s)    │
-│  └───────────────────────────────┘                          │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ WebSocket  ws://localhost:8000/ws
-┌──────────────────────────▼──────────────────────────────────┐
-│                    Next.js Dashboard                         │
-│  CandlestickChart · OrderBook · AgentCards · ActivityFeed   │
-│  Zustand: marketStore · agentStore · feedStore              │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                    Somnia Blockchain (chain 50312)                    │
+│                                                                       │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │  Exchange.sol  (real on-chain LOB with matching engine)      │    │
+│  │  placeOrder() → _matchOrder() → TradeExecuted(price,amount) │    │
+│  │  getBestBid() · getBestAsk() · getLastTradePrice()          │    │
+│  └─────────────────────┬───────────────────────┬──────────────┘    │
+│                         │ placeOrder            │ placeOrder        │
+│                         │ (3 direct agents)     │ (callback)        │
+│  ┌──────────────────────┴──┐  ┌────────────────┴──────────────┐    │
+│  │ AgentRegistry · Treasury│  │  AgentCoordinator.sol          │    │
+│  └─────────────────────────┘  │  requestDecision()             │    │
+│                                │    → IAgentRequester           │    │
+│                                │       .createRequest()          │    │
+│                                │  handleResponse() callback      │    │
+│                                │    → Exchange.placeOrder()      │    │
+│                                └────────────────┬──────────────┘    │
+│                                        Somnia platform calls         │
+│  ┌─────────────────────────────────────  handleResponse()      ┐    │
+│  │  Somnia LLM Inference Agent                                  │    │
+│  │  inferString(context, systemPrompt, ["BUY","SELL","HOLD"])   │    │
+│  │  → multi-validator consensus → "BUY" / "SELL" / "HOLD"  ───►│    │
+│  └──────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────┘
+         ↑ web3 txs (6 gwei hardcoded)
+┌────────┴─────────────────────────────────────────────────────────────┐
+│                         FastAPI Backend                               │
+│  ┌──────────────────┐   ┌────────────────────────────────────────┐  │
+│  │  PriceEngine     │   │       4 × LangGraph Agent               │  │
+│  │  (GBM, anchored  ├──►│  observe→reason→decide→execute         │  │
+│  │   to chain fills)│   │         →broadcast (8s loop)            │  │
+│  └────────┬─────────┘   └──────────────────┬───────────────────── ┘  │
+│           │ _chain_price_sync_loop (5s)      │                        │
+│  ┌────────▼──────────────────────────────┐  │                        │
+│  │        MarketStateBus                 │◄─┘  (warnings, events)   │
+│  │  price · order book · history         │                            │
+│  │  agent warnings · events              ├──► WS broadcast (2s)     │
+│  └───────────────────────────────────────┘                            │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ WebSocket  ws://localhost:8000/ws
+┌──────────────────────────────▼───────────────────────────────────────┐
+│                    Next.js Dashboard                                  │
+│  CandlestickChart · OrderBook · AgentCards · ActivityFeed            │
+│  Each agent card: ⬡ ON-CHAIN LLM badge (violet when Somnia active)  │
+│  Zustand: marketStore · agentStore · feedStore                       │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -176,7 +204,10 @@ cp .env.example .env
 # Fill DEPLOYER_PRIVATE_KEY in contracts/.env
 
 npx hardhat run scripts/deploy.js --network somnia
-# Prints contract addresses and the exact env vars to copy
+# Deploys Exchange, AgentRegistry, Treasury, AgentCoordinator
+# Sets per-agent system prompts on-chain for all 4 agents
+# Funds AgentCoordinator with 0.05 STT for LLM request deposits
+# Prints the exact env vars to copy
 ```
 
 ### Step 4 — Register agents and fund treasuries
@@ -194,6 +225,7 @@ Copy the printed env vars from deploy.js into `backend/.env`:
 EXCHANGE_ADDRESS=0x...
 AGENT_REGISTRY_ADDRESS=0x...
 TREASURY_ADDRESS=0x...
+AGENT_COORDINATOR_ADDRESS=0x...
 MARKET_MAKER_PK=0x...
 MOMENTUM_TRADER_PK=0x...
 ARBITRAGE_AGENT_PK=0x...
@@ -229,11 +261,12 @@ Click the event injection buttons to watch agents react in real-time:
 somnia_hackathon/
 ├── contracts/              # Hardhat + Solidity
 │   ├── contracts/
-│   │   ├── Exchange.sol        # placeOrder / cancelOrder / executeTrade
+│   │   ├── Exchange.sol        # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
+│   │   ├── AgentCoordinator.sol # IAgentRequester integration — all 4 agents Somnia-native
 │   │   ├── AgentRegistry.sol   # agent registration + reputation
 │   │   └── Treasury.sol        # per-agent balances
 │   ├── scripts/
-│   │   ├── deploy.js           # deploys all 3 contracts, writes addresses
+│   │   ├── deploy.js           # deploys all 4 contracts, sets on-chain prompts, writes addresses
 │   │   └── seed.js             # registers agents, funds treasuries
 │   └── deployments/
 │       └── somnia-testnet.json # contract addresses + ABIs (auto-generated)
@@ -264,14 +297,15 @@ somnia_hackathon/
         └── useWebSocket.ts     # WS connect/reconnect + message dispatch
 ```
 
-**To change agent behavior:** edit `SYSTEM_PROMPTS` in `backend/graph/nodes.py`.  
+**To change agent behavior (onchain mode):** update `setSystemPrompt` calls in `contracts/scripts/deploy.js` and redeploy.  
+**To change agent behavior (simulation mode):** edit `SYSTEM_PROMPTS` in `backend/graph/nodes.py`.  
 **To add/remove agents:** edit `AGENT_CONFIGS` in `backend/agents/orchestrator.py`.
 
 ---
 
 ## Simulation Mode
 
-Set `SIMULATION_MODE=true` in `backend/.env` to skip real blockchain transactions — fake tx hashes are generated instead. The dashboard looks identical and all Claude reasoning still runs. Use this as a fallback if Somnia testnet is unreachable or wallets aren't set up yet.
+Set `SIMULATION_MODE=true` in `backend/.env` to skip real blockchain transactions — fake tx hashes are generated instead. The dashboard looks identical and Claude claude-sonnet-4-6 handles all reasoning (the same fallback path used when `AGENT_COORDINATOR_ADDRESS` is not set). Use this if Somnia testnet is unreachable or wallets aren't set up yet.
 
 ---
 

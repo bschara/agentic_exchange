@@ -35,6 +35,7 @@ class AgentState(TypedDict):
     last_tx_error: Optional[str]
     execution_success: bool
     last_action: str
+    used_somnia_agent: bool  # True when decision routed through Somnia's LLM consensus
 
     # Graph control
     loop_count: int

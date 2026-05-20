@@ -1,6 +1,6 @@
 # Backend — Agentic Exchange
 
-Python FastAPI server powering four autonomous LangGraph agents that trade on the Somnia blockchain via Claude claude-sonnet-4-6 reasoning.
+Python FastAPI server powering four autonomous LangGraph agents that trade on the Somnia blockchain. In onchain mode, decisions are validated by Somnia's LLM inference agent (multi-validator consensus). In simulation mode, Claude claude-sonnet-4-6 is used as a fallback.
 
 ---
 
@@ -73,6 +73,7 @@ All settings live in `config.py` (Pydantic Settings) and are loaded from `backen
 | `EXCHANGE_ADDRESS`            | `0x000...000`                      | Onchain only | Deployed Exchange.sol address                    |
 | `AGENT_REGISTRY_ADDRESS`      | `0x000...000`                      | Onchain only | Deployed AgentRegistry.sol address               |
 | `TREASURY_ADDRESS`            | `0x000...000`                      | Onchain only | Deployed Treasury.sol address                    |
+| `AGENT_COORDINATOR_ADDRESS`   | `0x000...000`                      | Onchain only | Deployed AgentCoordinator.sol address; when set (non-zero), all 4 agents use Somnia LLM |
 | `MARKET_MAKER_PK`             | `0x000...000`                      | Onchain only | Market Maker agent wallet private key            |
 | `MOMENTUM_TRADER_PK`          | `0x000...000`                      | Onchain only | Momentum Trader wallet private key               |
 | `ARBITRAGE_AGENT_PK`          | `0x000...000`                      | Onchain only | Arb Scanner wallet private key                   |
@@ -84,7 +85,9 @@ All settings live in `config.py` (Pydantic Settings) and are loaded from `backen
 | `PRICE_DRIFT`                 | `0.0002`                           | No           | GBM drift (μ)                                    |
 | `FRONTEND_URL`                | `http://localhost:3000`            | No           | Allowed CORS origin                              |
 
-**Simulation mode activates automatically** when contract addresses are still at the zero-address placeholder. You don't need to set `SIMULATION_MODE=true` explicitly — the guard is in `orchestrator.py:54`.
+**Simulation mode activates automatically** when contract addresses are still at the zero-address placeholder. You don't need to set `SIMULATION_MODE=true` explicitly — the guard is in `orchestrator.py`.
+
+**Somnia LLM mode activates automatically** when `AGENT_COORDINATOR_ADDRESS` is set to a non-zero address and simulation mode is off. On startup, the orchestrator fires one `triggerAgentDecision()` per agent; after that, the contract self-re-triggers and Python never touches the contracts again.
 
 ---
 
@@ -106,6 +109,11 @@ observe_node → reason_node → decide_node → execute_node → broadcast_node
 
 ### `reason_node` (`graph/nodes.py`)
 
+**Onchain mode** (when `_global_coordinator` is set):
+- Returns immediately; writes placeholder reasoning string to state
+- No Claude API call; actual decision is deferred to Somnia validator consensus in `execute_node`
+
+**Simulation mode:**  
 **Reads:** `state["market_context"]`, `SYSTEM_PROMPTS[agent_id]`  
 **Calls:** `anthropic.messages.create(model=..., max_tokens=400, system=..., user=market_context)`  
 **Writes to state:** `state["reasoning"]` (raw Claude text output)
@@ -128,24 +136,30 @@ Decision actions:
 
 ### `execute_node` (`graph/nodes.py`)
 
-**Reads:** `state["decision"]`, `_global_exchange`, `_global_treasury`  
-**Does:**
+**Reads:** `state["decision"]`, `_global_coordinator`, `_global_exchange`, `_global_treasury`
 
+**Onchain mode** (coordinator set):
+- No-op. The contract is self-re-triggering: `handleDecision()` calls `_retrigger()` at the end of every cycle. Python fires one `triggerAgentDecision()` per agent in `orchestrator.start_all()` on startup — after that, no Python interaction with contracts occurs.
+- Carries forward `last_tx_hash` for dashboard display. Sets `used_somnia_agent=True`.
+
+**Simulation mode:**
 - `place_order` → `ExchangeContract.place_order(agent_pk, is_buy, price, amount)` → writes `last_tx_hash`
 - `cancel_all_orders` → loops over `active_order_ids`, calls `cancel_order()` for each
 - `hold` / `broadcast_warning` → no-op on blockchain
-- Any tx error → logged, `execution_success=False`, agent never crashes  
-  **Writes to state:** `last_tx_hash`, `execution_success`, `current_position`, `position_side`, `entry_price`, `pnl_session`
+- Any tx error → logged, `execution_success=False`, agent never crashes
+
+**Writes to state:** `last_tx_hash`, `execution_success`, `used_somnia_agent`, `current_position`, `position_side`, `entry_price`, `pnl_session`
 
 ### `broadcast_node` (`graph/nodes.py`)
 
 **Does:**
 
-1. Sends `agent_update` WS message to all dashboard clients
+1. Sends `agent_update` WS message to all dashboard clients (includes `used_somnia_agent` field)
 2. Sends `activity_feed` WS message with human-readable action summary
-3. If agent is Risk Manager and action is `broadcast_warning` → calls `state_bus.set_agent_warning()` (other agents read this on their next `observe`)
-4. `await asyncio.sleep(AGENT_LOOP_INTERVAL_SECONDS)` — this is the pacing mechanism
-5. Sets `should_continue=True` → graph loops back to `observe`
+3. **Risk Manager** (onchain mode): threshold check on `volatility_estimate` — `> 3%` sets a warning, `< 2%` clears it. No LLM call needed.
+4. **Risk Manager** (simulation mode): if action is `broadcast_warning` → calls `state_bus.set_agent_warning()` with the message from Claude's decision params
+5. `await asyncio.sleep(AGENT_LOOP_INTERVAL_SECONDS)` — this is the pacing mechanism
+6. Sets `should_continue=True` → graph loops back to `observe`
 
 ---
 
@@ -204,6 +218,16 @@ All methods protected by `asyncio.Lock` for safe concurrent access from 4 agent 
 ### `blockchain/contracts.py`
 
 ABI loading strategy: tries `contracts/deployments/somnia-testnet.json` first (deployed ABIs), falls back to minimal inline ABIs. This means the backend works before deployment with reduced functionality.
+
+**`AgentCoordinatorContract`** — wraps `AgentCoordinator.sol`:
+- `trigger_decision(agent_pk, agent_id)` → ABI-encodes `triggerAgentDecision(agentId)`, submits signed tx from the agent's wallet. Called once per agent at startup by `orchestrator.start_all()`. After this the contract self-loops.
+- `get_balance()` → reads the coordinator's STT balance (must stay funded; each cycle costs 2 deposits)
+
+**Updated `ExchangeContract`** methods:
+- `get_best_bid()` / `get_best_ask()` → on-chain spread from active order book
+- `get_last_trade_price()` → price of most recent matched fill (0 if no fills yet)
+- `has_traded()` → bool — whether any match has ever occurred
+- `get_recent_trade_events()` → reads `TradeExecuted` event logs for OHLCV construction
 
 ---
 
@@ -266,10 +290,11 @@ Set `INITIAL_PRICE` and `PRICE_VOLATILITY` in `backend/.env`. Volatility (`σ`) 
 
 | Decision                                  | Reason                                                                                        |
 | ----------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `execute_node` is a no-op in onchain mode | Contract self-re-triggers via `_retrigger()` — Python fires one startup kick per agent, then the loop lives entirely on-chain |
 | All 4 agents use `BaseAgent` + same graph | Strategy differentiation via system prompt only — simpler to reason about and modify          |
-| `asyncio.Lock` per wallet                 | Concurrent agents would cause nonce conflicts and dropped txs                                 |
+| `asyncio.Lock` per wallet                 | Concurrent agents would cause nonce conflicts and dropped txs (matters for startup triggers and simulation mode) |
 | GBM price, not a real feed                | Demo needs controllable events (whale buy, crash) — a real feed can't be scripted             |
 | Simulation mode                           | Somnia testnet reliability is unpredictable; demo must work without blockchain access         |
 | Agents stagger 2s at startup              | Spreads the burst of Anthropic API calls during initialization                                |
 | Hardcoded 6 gwei gas                      | `eth_gasPrice` RPC returns unreliable values on Somnia testnet; hardcoding avoids tx failures |
-| 30s receipt timeout (not infinite)        | A stuck tx should never block the agent loop — log and continue                               |
+| 30s receipt timeout (not infinite)        | A stuck startup trigger should never block the orchestrator — log and continue                |

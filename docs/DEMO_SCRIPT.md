@@ -40,9 +40,9 @@ If any agent is blank: wait 30s after startup for all 4 to complete their first 
 
 Point to each section:
 
-- **Chart (top left):** "Live candlestick chart — each bar is 5 seconds of real price movement driven by our price engine"
-- **Order Book (bottom left):** "Live bid-ask depth. Every level you see is an order placed or modified by an agent."
-- **Agent Cards (right):** "Four agents, each with a different strategy. Each one is running a LangGraph loop — observe market → reason with Claude claude-sonnet-4-6 → decide → execute onchain → broadcast reasoning."
+- **Chart (top left):** "Live candlestick chart — each bar is 5 seconds. When we're onchain, this chart is driven by real matched trades from the Exchange contract."
+- **Order Book (bottom left):** "Live bid-ask depth from the on-chain LOB. These are real orders sitting in `Exchange.sol`."
+- **Agent Cards (right):** "Four agents, each with a different strategy. Notice the `⬡ ON-CHAIN LLM` badge on each card — that lights up violet when the last decision was validated by Somnia's on-chain LLM agent, not just an off-chain bot."
 - **Activity Feed (bottom):** "Every line is a real agent action from the last few seconds."
 
 ---
@@ -51,12 +51,17 @@ Point to each section:
 
 Point to an agent card that has a tx hash visible.
 
-> "Every reasoning step ends in a real onchain transaction. Watch this."
+> "Every agent decision ends in a real onchain transaction. Watch this."
 
 Click the tx hash → Somnia explorer opens.
 
 > "That's chain 50312. Somnia testnet. The transaction is permanent, on-chain, indexed."
-> "This agent placed a limit order. The reasoning panel shows exactly why."
+
+> "When we started the backend, Python fired one transaction per agent — `triggerAgentDecision()`. That's the last time Python ever touches the contracts. From that point, the agents run themselves."
+
+> "Each cycle is three transactions, all on-chain. First: a JSON API agent fetches the real ETH price. Second: the price and on-chain order book state are fed to Somnia's LLM inference agent — validators reach consensus on BUY, SELL, or HOLD. Third: `handleDecision()` places the order on the Exchange LOB, then immediately fires `_retrigger()` to start the next cycle."
+
+> "So the AI decision is on-chain, validated by a decentralized network. And the loop never stops — unless the coordinator runs out of STT, at which point it emits a `LoopStopped` event and halts gracefully."
 
 ---
 
@@ -106,11 +111,13 @@ Watch agents scramble — activity feed lights up.
 
 ## Minute 4:00 — Tie it back to Somnia
 
-> "Why Somnia? Traditional EVM chains have 12-15 second block times. An agent loop that places an order and waits for confirmation takes 30+ seconds per decision."
+> "Why Somnia? Two things no other chain can do."
 
-> "Somnia's real-time execution means agents can run at 8-second loops — fast enough to actually react to market events. That's not possible anywhere else."
+> "First: an on-chain limit order book that matches orders in the same block they're placed. 12-15 second block times make that impossible — by the time the order lands, the market has moved. Somnia's sub-second finality makes real-time price discovery onchain possible."
 
-> "Autonomous AI needs fast, cheap, finalized transactions. That's Somnia's exact value proposition. We built this to prove it."
+> "Second: AI decisions validated by a decentralized network of validators. These agents aren't just off-chain bots pushing orders — their BUY/SELL/HOLD decisions go through Somnia's LLM inference agent, where validators reach consensus before the order is placed. That's verifiable, auditable, on-chain AI."
+
+> "Autonomous AI needs fast finality AND trustless AI execution. That's exactly what Somnia delivers. We built this to prove both."
 
 ---
 
@@ -126,9 +133,12 @@ Watch agents scramble — activity feed lights up.
 
 ## Backup talking points
 
-- **"Is this simulated?"** → No. Every tx hash links to a real Somnia explorer entry. The price engine is synthetic (GBM), but all orders and trades are onchain.
-- **"What model powers the agents?"** → Claude claude-sonnet-4-6 by Anthropic. Each agent has a unique system prompt defining its strategy.
-- **"How does agent coordination work?"** → Risk Manager writes warnings to a shared `MarketStateBus` (in-memory async-safe state). Every other agent reads those warnings in their `observe` step and passes them to Claude as context. Decide node also enforces 50% order size reduction on any active warning, regardless of what Claude says. So it's both LLM-level coordination (Claude knows about the warning) and rule-level enforcement.
-- **"What happens if Somnia testnet is down?"** → Simulation mode: flip one env var (`SIMULATION_MODE=true` in `backend/.env`), fake tx hashes are generated. Dashboard looks identical. We built this specifically as a demo reliability fallback.
-- **"How does agent coordination work in detail?"** → There are three layers: (1) `MarketStateBus` — shared in-memory state that all agents observe each loop; (2) warning propagation — Risk Manager writes a structured warning object that other agents receive as part of their Claude context; (3) rule enforcement — `decide_node` automatically halves order sizes when a warning is active, regardless of Claude's output. So even if Claude doesn't act on the warning, the system enforces safe behavior.
-- **"What happens if an agent wallet runs out of gas?"** → The `observe_node` checks the onchain balance each loop. If it drops below 0.01 STT, the agent is forced to `hold` — no orders are placed. This is a hard guard in `decide_node` before any tx is attempted. The agent continues running (reasoning is still visible), it just sits out until refunded.
+- **"Is this simulated?"** → No. Every tx hash links to a real Somnia explorer entry. The price engine is GBM-based (for smooth animation), but when onchain, it anchors to real fill prices from Exchange.sol every 5 seconds. All orders and trades are onchain.
+- **"Does Python keep calling the contract every loop?"** → No. Python fires one `triggerAgentDecision()` per agent at startup — that's it. After that, `handleDecision()` calls `_retrigger()` at the end of each cycle to fire the next one on-chain. The backend's only remaining jobs are the WebSocket dashboard and the event injection buttons.
+- **"What happens if the coordinator runs out of STT?"** → It emits `LoopStopped(agentId, "Insufficient balance", balance)` and stops gracefully. No crash. Just fund it again via `AgentCoordinator.fund()` and fire a new `triggerAgentDecision()` to restart.
+- **"What is the `⬡ ON-CHAIN LLM` badge?"** → Each agent card shows this badge. It lights up violet when the last decision cycle went through Somnia's on-chain LLM inference agent (i.e., `used_somnia_agent=true` in the agent state). Grey means the agent is in simulation mode using Claude.
+- **"What model powers the agents in simulation mode?"** → Claude claude-sonnet-4-6 by Anthropic. Each agent has a unique strategy system prompt. The same prompts are also stored on-chain in `AgentCoordinator.systemPrompts` for the Somnia LLM path.
+- **"What happens if Somnia's LLM agent is unavailable?"** → The system falls back to Claude automatically. If `AGENT_COORDINATOR_ADDRESS` is not set (or zero), `reason_node` runs Claude and `execute_node` uses direct Exchange calls. The demo works identically.
+- **"How does agent coordination work?"** → Risk Manager monitors volatility. When it exceeds 3%, it writes a warning to `MarketStateBus` and broadcasts a `risk_warning` WS message to the dashboard. Every other agent reads those warnings in their `observe` step — both the Somnia LLM and Claude receive them as context. `decide_node` also enforces 50% order-size reduction on any active warning, regardless of what the LLM decides.
+- **"What happens if Somnia testnet is down?"** → Simulation mode: set `SIMULATION_MODE=true` in `backend/.env`. Fake tx hashes are generated, Claude handles all reasoning. Dashboard looks identical.
+- **"What happens if an agent wallet runs out of gas?"** → `observe_node` checks the onchain balance each loop. If it drops below 0.01 STT, the agent is forced to `hold` — a hard guard in `decide_node`. The agent keeps running (reasoning still visible), it just sits out until refunded.

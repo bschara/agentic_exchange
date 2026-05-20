@@ -39,6 +39,7 @@ export interface AgentState {
   reasoning: string;
   reasoning_summary: string;
   loop_count: number;
+  used_somnia_agent: boolean;
   timestamp: number;
 }
 
