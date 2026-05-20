@@ -1,0 +1,7 @@
+node_modules
+.env
+
+# Hardhat build output
+artifacts/
+cache/
+typechain-types/
