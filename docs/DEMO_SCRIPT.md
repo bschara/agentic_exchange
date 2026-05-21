@@ -14,7 +14,7 @@
 - [ ] Chart is rendering live candles (not frozen)
 - [ ] Activity feed is scrolling with new entries
 
-If any agent is blank: wait 30s after startup for all 4 to complete their first loop (they stagger 2s apart). If still blank after 60s, check `ANTHROPIC_API_KEY` in `backend/.env`.
+If chain metrics are blank: wait 30s after startup for the first coordinator event poll cycle. If still blank, verify contract addresses are set in `backend/.env` and the coordinator has sufficient STT balance.
 
 ---
 
@@ -136,9 +136,7 @@ Watch agents scramble — activity feed lights up.
 - **"Is this simulated?"** → No. Every tx hash links to a real Somnia explorer entry. The price engine is GBM-based (for smooth animation), but when onchain, it anchors to real fill prices from Exchange.sol every 5 seconds. All orders and trades are onchain.
 - **"Does Python keep calling the contract every loop?"** → No. Python fires one `triggerAgentDecision()` per agent at startup — that's it. After that, `handleDecision()` calls `_retrigger()` at the end of each cycle to fire the next one on-chain. The backend's only remaining jobs are the WebSocket dashboard and the event injection buttons.
 - **"What happens if the coordinator runs out of STT?"** → It emits `LoopStopped(agentId, "Insufficient balance", balance)` and stops gracefully. No crash. Just fund it again via `AgentCoordinator.fund()` and fire a new `triggerAgentDecision()` to restart.
-- **"What is the `⬡ ON-CHAIN LLM` badge?"** → Each agent card shows this badge. It lights up violet when the last decision cycle went through Somnia's on-chain LLM inference agent (i.e., `used_somnia_agent=true` in the agent state). Grey means the agent is in simulation mode using Claude.
-- **"What model powers the agents in simulation mode?"** → Claude claude-sonnet-4-6 by Anthropic. Each agent has a unique strategy system prompt. The same prompts are also stored on-chain in `AgentCoordinator.systemPrompts` for the Somnia LLM path.
-- **"What happens if Somnia's LLM agent is unavailable?"** → The system falls back to Claude automatically. If `AGENT_COORDINATOR_ADDRESS` is not set (or zero), `reason_node` runs Claude and `execute_node` uses direct Exchange calls. The demo works identically.
-- **"How does agent coordination work?"** → Risk Manager monitors volatility. When it exceeds 3%, it writes a warning to `MarketStateBus` and broadcasts a `risk_warning` WS message to the dashboard. Every other agent reads those warnings in their `observe` step — both the Somnia LLM and Claude receive them as context. `decide_node` also enforces 50% order-size reduction on any active warning, regardless of what the LLM decides.
-- **"What happens if Somnia testnet is down?"** → Simulation mode: set `SIMULATION_MODE=true` in `backend/.env`. Fake tx hashes are generated, Claude handles all reasoning. Dashboard looks identical.
-- **"What happens if an agent wallet runs out of gas?"** → `observe_node` checks the onchain balance each loop. If it drops below 0.01 STT, the agent is forced to `hold` — a hard guard in `decide_node`. The agent keeps running (reasoning still visible), it just sits out until refunded.
+- **"What is the `⬡ ON-CHAIN LLM` badge?"** → Each agent card shows this badge, indicating the agent's decisions are being made by Somnia's decentralized LLM inference agent — multi-validator consensus, fully on-chain.
+- **"What model powers the agents?"** → Somnia's on-chain LLM Inference Agent (base agent ID 2) — multi-validator consensus across Somnia's decentralized network. Each agent's strategy system prompt is stored in `AgentCoordinator.systemPrompts` and set at deploy time.
+- **"How does agent coordination work?"** → Risk Manager's on-chain agent monitors volatility via `chain_metrics`. When it exceeds 3%, the backend writes a warning to `MarketStateBus` and broadcasts a `risk_warning` WS message to the dashboard. The Somnia LLM receives this warning as part of the market context string on the next decision cycle.
+- **"What happens if the coordinator runs out of fuel?"** → `_retrigger()` checks `address(this).balance >= deposit × 2` before firing the next cycle. If underfunded, it emits `LoopStopped(agentId, "Insufficient balance", balance)` and halts gracefully. Fund via `AgentCoordinator.fund()` and restart.

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 from typing import Optional
 
 from web3 import Web3
@@ -38,15 +37,6 @@ async def send_transaction(
     value: int = 0,
     rpc_url: str = "https://dream-rpc.somnia.network",
 ) -> str:
-    from config import settings
-
-    if settings.simulation_mode:
-        import random
-        fake_hash = "0x" + "".join(random.choices("0123456789abcdef", k=64))
-        logger.info(f"[SIMULATION] Fake tx: {fake_hash}")
-        await asyncio.sleep(0.5)
-        return fake_hash
-
     w3 = get_web3(rpc_url)
     account = Account.from_key(private_key)
     address = account.address

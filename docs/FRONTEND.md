@@ -214,7 +214,7 @@ This project uses `lightweight-charts@5.x`. The v5 API broke compatibility with 
 3. **`components/agents/AgentGrid.tsx`**: Add new `agent_id` to the ordered array
 4. **`components/agents/AgentCard.tsx`**: Add emoji to the icon map and color to the color map
 5. **`lib/types.ts`**: Add new id to the `AgentState["agent_id"]` union type
-6. Backend: add to `AGENT_CONFIGS` + `SYSTEM_PROMPTS` + config + .env
+6. Backend: add to `AGENT_CONFIGS` in `orchestrator.py` + `config.py` + `.env` + `deploy.js` (`setSystemPrompt`)
 
 ---
 

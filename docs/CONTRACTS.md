@@ -101,7 +101,7 @@ System prompt set on-chain for market_maker
 System prompt set on-chain for momentum_trader
 System prompt set on-chain for arbitrage_agent
 System prompt set on-chain for risk_manager
-AgentCoordinator funded with 0.05 STT
+AgentCoordinator funded with 0.2 STT
 
 ─── Add to backend/.env ───────────────────────────
 EXCHANGE_ADDRESS=0x1111...
@@ -236,7 +236,7 @@ event LoopStopped(string agentId, string reason, uint256 balance);
 
 `LoopStopped` fires when `_retrigger()` cannot proceed — either because the coordinator's STT balance is below `deposit × 2`, or because no `agentConfig` is registered for that agent ID. Monitor this event to know when to top up via `fund()`.
 
-**Deployment:** `deploy.js` automatically sets `systemPrompts` and `agentConfigs` for all 4 agents and funds the coordinator with 0.05 STT. Each full cycle (JSON fetch + LLM inference) consumes 2 deposits. Top up via `fund()` to keep agents running.
+**Deployment:** `deploy.js` automatically sets `systemPrompts` and `agentConfigs` for all 4 agents and funds the coordinator with 0.2 STT. Each full cycle (JSON fetch + LLM inference) consumes 2 deposits. Top up via `fund()` to keep agents running. The Python backend monitors the coordinator balance and emits `loop_stopped_any` in the `chain_metrics` feed when a `LoopStopped` event is detected.
 
 ---
 
@@ -315,7 +315,7 @@ event Allocated(address indexed from, address indexed to, uint256 amount);
 1. Gets deployer signer from hardhat
 2. Deploys `Exchange`, `AgentRegistry`, `Treasury`, `AgentCoordinator` sequentially
 3. Calls `AgentCoordinator.setSystemPrompt()` for all 4 agents (market_maker, momentum_trader, arbitrage_agent, risk_manager) — prompts stored on-chain
-4. Funds `AgentCoordinator` with 0.05 STT for LLM inference deposits
+4. Funds `AgentCoordinator` with 0.2 STT for LLM inference deposits
 5. Reads compiled ABIs from `artifacts/`
 6. Writes `deployments/somnia-testnet.json` with addresses + ABIs
 7. Prints the exact env vars to copy into `backend/.env` (including `AGENT_COORDINATOR_ADDRESS`)

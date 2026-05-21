@@ -44,6 +44,13 @@ async def get_agents():
     return list(_orchestrator.get_agent_states().values())
 
 
+@router.get("/chain-metrics")
+async def get_chain_metrics():
+    if not _orchestrator:
+        return {}
+    return _orchestrator._chain_metrics
+
+
 @router.post("/events/inject")
 async def inject_event(req: InjectEventRequest):
     if _orchestrator:

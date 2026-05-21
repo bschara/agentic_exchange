@@ -136,7 +136,6 @@ contract AgentCoordinator {
 
         _allowedValues.push("BUY");
         _allowedValues.push("SELL");
-        _allowedValues.push("HOLD");
     }
 
     receive() external payable {}

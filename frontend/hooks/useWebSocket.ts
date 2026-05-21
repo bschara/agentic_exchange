@@ -11,16 +11,44 @@ function dispatch(msg: WSMessage) {
     case 'market_snapshot':
       useMarketStore.getState().setMarketSnapshot(msg.data);
       break;
+
     case 'candle':
       useMarketStore.getState().addCandle(msg.data);
       break;
-    case 'agent_update':
-      useAgentStore.getState().updateAgent(msg.data);
-      useAgentStore.getState().appendReasoning(msg.data.agent_id, msg.data.reasoning);
+
+    case 'chain_metrics': {
+      const prevAgents = useAgentStore.getState().agents;
+      useAgentStore.getState().updateFromChainMetrics(msg.data);
+
+      for (const [id, agent] of Object.entries(msg.data.agents)) {
+        const prev = prevAgents[id];
+
+        if (prev && agent.decisions_total > prev.decisions_total && agent.last_decision) {
+          const price = agent.last_price > 0 ? `$${agent.last_price.toFixed(2)}` : '—';
+          useFeedStore.getState().addItem({
+            id: `${Date.now()}-${id}`,
+            agent_id: id,
+            agent_name: agent.agent_name,
+            message: `${agent.last_decision} order at ${price}`,
+            category: agent.last_decision === 'HOLD' ? 'system' : 'order',
+            timestamp: Math.floor(Date.now() / 1000),
+          });
+        }
+
+        if (prev && !prev.loop_stopped && agent.loop_stopped) {
+          useFeedStore.getState().addItem({
+            id: `${Date.now()}-stop-${id}`,
+            agent_id: id,
+            agent_name: agent.agent_name,
+            message: `Loop stopped: ${agent.loop_stopped_reason || 'insufficient balance'}`,
+            category: 'warning',
+            timestamp: Math.floor(Date.now() / 1000),
+          });
+        }
+      }
       break;
-    case 'activity_feed':
-      useFeedStore.getState().addItem(msg.data);
-      break;
+    }
+
     case 'risk_warning':
       useFeedStore.getState().addItem({
         id: String(Date.now()),
@@ -31,6 +59,7 @@ function dispatch(msg: WSMessage) {
         timestamp: Math.floor(Date.now() / 1000),
       });
       break;
+
     case 'event_injected':
       useFeedStore.getState().addItem({
         id: String(Date.now()),

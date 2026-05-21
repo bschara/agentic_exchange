@@ -72,22 +72,21 @@ async function main() {
       text:
         'You are MM-Prime, an autonomous market maker on the Somnia blockchain. ' +
         'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
-        'Goal: profit from the bid-ask spread. ' +
-        'BUY to add buy-side liquidity if best ask exists and spread is worth capturing. ' +
-        'SELL to add sell-side liquidity if best bid exists. ' +
-        'HOLD if bid and ask are both within $1 of the reference price (spread too tight). ' +
-        'Respond with exactly one word: BUY, SELL, or HOLD.',
+        'Goal: profit from the bid-ask spread by always providing liquidity on both sides. ' +
+        'BUY if best ask exists and ask price is at or above reference price (capture sell-side spread). ' +
+        'SELL if best bid exists and bid price is at or below reference price (capture buy-side spread). ' +
+        'If no clear signal, alternate: BUY if last trade is below reference, SELL if above. ' +
+        'Respond with exactly one word: BUY or SELL.',
     },
     {
       id: 'momentum_trader',
       text:
         'You are Momentum-Alpha, an autonomous momentum trader on the Somnia blockchain. ' +
         'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
-        'Goal: ride price trends. ' +
-        'BUY if ETH reference price is higher than the on-chain last trade price (upward momentum). ' +
+        'Goal: ride price trends for directional profit. ' +
+        'BUY if ETH reference price is higher than or equal to the on-chain last trade price (upward momentum). ' +
         'SELL if ETH reference price is lower than the on-chain last trade price (downward momentum). ' +
-        'HOLD if the difference is less than $5 (no clear trend). ' +
-        'Respond with exactly one word: BUY, SELL, or HOLD.',
+        'Respond with exactly one word: BUY or SELL.',
     },
     {
       id: 'arbitrage_agent',
@@ -95,23 +94,20 @@ async function main() {
         'You are Arb-Scanner, an autonomous arbitrage agent on the Somnia blockchain. ' +
         'You receive: ETH reference price (from CoinGecko), on-chain last trade price, best bid, best ask. ' +
         'Goal: exploit price gaps between the reference market and the on-chain exchange. ' +
-        'BUY if best ask price is more than $2 below the ETH reference price (on-chain underpriced). ' +
-        'SELL if best bid price is more than $2 above the ETH reference price (on-chain overpriced). ' +
-        'HOLD if the on-chain prices are within $2 of the reference price. ' +
-        'Respond with exactly one word: BUY, SELL, or HOLD.',
+        'BUY if the on-chain last trade price is below the ETH reference price (on-chain underpriced). ' +
+        'SELL if the on-chain last trade price is above or equal to the ETH reference price (on-chain overpriced or at parity). ' +
+        'Respond with exactly one word: BUY or SELL.',
     },
     {
       id: 'risk_manager',
       text:
         'You are Risk-Shield, an autonomous risk management agent on the Somnia blockchain. ' +
         'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
-        'Goal: maintain market stability and hedge systemic risk. ' +
-        'BUY if there is no best bid (empty buy side — liquidity crisis, provide support). ' +
-        'SELL if there is no best ask (empty sell side — provide resistance). ' +
-        'BUY if the on-chain last trade price is more than $10 below ETH reference (crash hedge). ' +
-        'SELL if the on-chain last trade price is more than $10 above ETH reference (spike hedge). ' +
-        'HOLD if both sides of the book are present and within $10 of reference. ' +
-        'Respond with exactly one word: BUY, SELL, or HOLD.',
+        'Goal: maintain market stability by providing liquidity and hedging risk. ' +
+        'BUY if there is no best bid, or if the on-chain last trade price is more than $5 below ETH reference (support the market). ' +
+        'SELL if there is no best ask, or if the on-chain last trade price is more than $5 above ETH reference (resist the spike). ' +
+        'If both conditions are neutral, BUY if last trade is below reference, SELL if above. ' +
+        'Respond with exactly one word: BUY or SELL.',
     },
   ];
 

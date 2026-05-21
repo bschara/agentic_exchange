@@ -26,15 +26,19 @@ def _load_abis():
         {"inputs": [{"name": "isBuy", "type": "bool"}, {"name": "price", "type": "uint256"}, {"name": "amount", "type": "uint256"}], "name": "placeOrder", "outputs": [{"name": "orderId", "type": "uint256"}], "stateMutability": "nonpayable", "type": "function"},
         {"inputs": [{"name": "orderId", "type": "uint256"}], "name": "cancelOrder", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
         {"inputs": [], "name": "getActiveOrders", "outputs": [{"name": "", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "getActiveBuys", "outputs": [{"name": "", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "getActiveSells", "outputs": [{"name": "", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getBestBid", "outputs": [{"name": "price", "type": "uint256"}, {"name": "exists", "type": "bool"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getBestAsk", "outputs": [{"name": "price", "type": "uint256"}, {"name": "exists", "type": "bool"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getLastTradePrice", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "hasTraded", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
+        {"anonymous": False, "inputs": [{"indexed": True, "name": "orderId", "type": "uint256"}, {"indexed": True, "name": "agent", "type": "address"}, {"indexed": False, "name": "isBuy", "type": "bool"}, {"indexed": False, "name": "price", "type": "uint256"}, {"indexed": False, "name": "amount", "type": "uint256"}], "name": "OrderPlaced", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "tradeId", "type": "uint256"}, {"indexed": False, "name": "buyOrderId", "type": "uint256"}, {"indexed": False, "name": "sellOrderId", "type": "uint256"}, {"indexed": True, "name": "buyer", "type": "address"}, {"indexed": True, "name": "seller", "type": "address"}, {"indexed": False, "name": "price", "type": "uint256"}, {"indexed": False, "name": "amount", "type": "uint256"}], "name": "TradeExecuted", "type": "event"},
     ]
     _ABIS["Treasury"] = [
         {"inputs": [], "name": "deposit", "outputs": [], "stateMutability": "payable", "type": "function"},
         {"inputs": [{"name": "agent", "type": "address"}], "name": "getBalance", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "totalLocked", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
     ]
     _ABIS["AgentRegistry"] = [
         {"inputs": [{"name": "agent", "type": "address"}], "name": "getAgent", "outputs": [{"components": [{"name": "wallet", "type": "address"}, {"name": "name", "type": "string"}, {"name": "strategy", "type": "string"}, {"name": "reputation", "type": "int256"}, {"name": "tradesExecuted", "type": "uint256"}, {"name": "registeredAt", "type": "uint256"}, {"name": "active", "type": "bool"}], "name": "", "type": "tuple"}], "stateMutability": "view", "type": "function"},
@@ -128,6 +132,42 @@ class ExchangeContract:
         except Exception:
             return False
 
+    async def get_order_book_depth(self) -> dict:
+        loop = asyncio.get_event_loop()
+        try:
+            buys, sells = await asyncio.gather(
+                loop.run_in_executor(None, lambda: self._contract.functions.getActiveBuys().call()),
+                loop.run_in_executor(None, lambda: self._contract.functions.getActiveSells().call()),
+            )
+            return {"buy_count": len(buys), "sell_count": len(sells)}
+        except Exception as e:
+            logger.debug(f"get_order_book_depth failed: {e}")
+            return {"buy_count": 0, "sell_count": 0}
+
+    async def get_order_placed_events(self, from_block: int) -> list[dict]:
+        loop = asyncio.get_event_loop()
+        try:
+            events = await loop.run_in_executor(
+                None,
+                lambda: self._contract.events.OrderPlaced.get_logs(
+                    from_block=from_block, to_block="latest"
+                ),
+            )
+            return [
+                {
+                    "agent": e["args"]["agent"],
+                    "order_id": int(e["args"]["orderId"]),
+                    "is_buy": e["args"]["isBuy"],
+                    "price": float(Web3.from_wei(e["args"]["price"], "ether")),
+                    "amount": float(Web3.from_wei(e["args"]["amount"], "ether")),
+                    "block": e["blockNumber"],
+                }
+                for e in events
+            ]
+        except Exception as e:
+            logger.debug(f"OrderPlaced event poll failed: {e}")
+            return []
+
     async def get_recent_trade_events(self, from_block: int, to_block: str = "latest") -> list[dict]:
         """Poll TradeExecuted events for on-chain price history."""
         loop = asyncio.get_event_loop()
@@ -176,6 +216,17 @@ class TreasuryContract:
             logger.warning(f"Treasury.getBalance failed: {e}")
             return 0.0
 
+    async def get_total_locked(self) -> float:
+        loop = asyncio.get_event_loop()
+        try:
+            balance_wei = await loop.run_in_executor(
+                None, lambda: self._contract.functions.totalLocked().call()
+            )
+            return float(Web3.from_wei(balance_wei, "ether"))
+        except Exception as e:
+            logger.debug(f"Treasury.totalLocked failed: {e}")
+            return 0.0
+
 
 class AgentCoordinatorContract:
     """
@@ -217,3 +268,31 @@ class AgentCoordinatorContract:
         except Exception as e:
             logger.debug(f"AgentCoordinator.getBalance failed: {e}")
             return 0.0
+
+    async def get_coordinator_events(self, from_block: int) -> list[dict]:
+        """Poll all coordinator events in one pass. Returns events sorted by block."""
+        loop = asyncio.get_event_loop()
+        results = []
+
+        event_types = [
+            ("DecisionExecuted", self._contract.events.DecisionExecuted),
+            ("DecisionFailed",   self._contract.events.DecisionFailed),
+            ("LoopStopped",      self._contract.events.LoopStopped),
+            ("LLMRequestFired",  self._contract.events.LLMRequestFired),
+        ]
+
+        for name, event_cls in event_types:
+            try:
+                events = await loop.run_in_executor(
+                    None,
+                    lambda ec=event_cls: ec.get_logs(from_block=from_block, to_block="latest"),
+                )
+                for e in events:
+                    entry = {"event": name, "block": e["blockNumber"]}
+                    entry.update(dict(e["args"]))
+                    results.append(entry)
+            except Exception as e:
+                logger.debug(f"{name} event poll failed: {e}")
+
+        results.sort(key=lambda x: x["block"])
+        return results

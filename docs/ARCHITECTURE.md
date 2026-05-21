@@ -1,6 +1,6 @@
 # Architecture — Agentic Exchange
 
-Real-time autonomous trading demo on Somnia (chain 50312). Four agents trade in continuous 8-second loops, with decisions validated by Somnia's on-chain LLM consensus layer when deployed. Every order lands on a real on-chain limit order book with automatic matching. A WebSocket-connected dashboard makes the system observable in real-time.
+Real-time autonomous trading demo on Somnia (chain 50312). Four agents trade autonomously on-chain, with decisions validated by Somnia's LLM consensus layer. Every order lands on a real on-chain limit order book with automatic matching. A WebSocket-connected dashboard makes the system observable in real-time.
 
 ---
 
@@ -15,36 +15,28 @@ Real-time autonomous trading demo on Somnia (chain 50312). Four agents trade in 
 │  │  placeOrder() → _matchOrder() → TradeExecuted(price,amount) │    │
 │  │  getBestBid() · getBestAsk() · getLastTradePrice()          │    │
 │  └─────────────────────┬──────────────────────┬───────────────┘    │
-│                         │ placeOrder (direct)   │ placeOrder        │
-│                         │                       │ (from callback)   │
+│                         │ placeOrder (callback)  │ events polled     │
 │  ┌──────────────────────┴──┐  ┌────────────────┴──────────────┐    │
 │  │ AgentRegistry · Treasury│  │  AgentCoordinator.sol          │    │
-│  └─────────────────────────┘  │  requestDecision()             │    │
-│                                │    → IAgentRequester           │    │
-│                                │  handleResponse() callback      │    │
-│                                │    → Exchange.placeOrder()      │    │
+│  └─────────────────────────┘  │  triggerAgentDecision() ×1     │    │
+│                                │  handlePriceData() callback    │    │
+│                                │  handleDecision() → placeOrder │    │
+│                                │  _retrigger() → self-loop      │    │
 │                                └────────────────┬──────────────┘    │
-│  ┌─────────────────────────────────────         │                   │
-│  │  Somnia LLM Inference Agent        ──────────┘ (platform fires) │
-│  │  inferString(ctx, systemPrompt,                                   │
-│  │    ["BUY","SELL","HOLD"])                                         │
+│  ┌─────────────────────────────────────         │ platform fires    │
+│  │  Somnia LLM Inference Agent        ──────────┘                  │
+│  │  inferString(ctx, systemPrompt, ["BUY","SELL","HOLD"])           │
 │  │  → multi-validator consensus                                      │
 │  └──────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
-         ↑ web3 txs (6 gwei hardcoded, per-wallet Lock)
+         ↑ 1 startup tx per agent (6 gwei)     ↑ event/state polling
 ┌────────┴─────────────────────────────────────────────────────────────┐
 │                         FastAPI Backend                               │
-│  ┌─────────────────┐   ┌──────────────────────────────────────────┐ │
-│  │ PriceEngine     │   │       4 × LangGraph Agent                 │ │
-│  │ (GBM, anchored  ├──►│  observe→reason→decide→execute→broadcast  │ │
-│  │  to chain fills)│   │  (8s loop)                                │ │
-│  └────────┬────────┘   └───────────────────┬──────────────────────┘ │
-│    _chain_price_sync_loop (5s)              │                        │
-│  ┌────────▼───────────────────────────────┐│                        │
-│  │        MarketStateBus                  ││ (warnings, events)     │
-│  │  price · order book · history          │◄┘                       │
-│  │  agent warnings · events               ├──► WS broadcast (2s)   │
-│  └────────────────────────────────────────┘                          │
+│  ┌─────────────────┐  trade event poll (1s) ──► PriceEngine         │
+│  │ MarketStateBus  │  snapshot broadcast (2s) ──────────────────►WS │
+│  │ price · book    │  contract metrics poll (5s) ──► chain_metrics  │
+│  │ warnings·events │                                                 │
+│  └─────────────────┘                                                  │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │ WebSocket  ws://localhost:8000/ws
 ┌──────────────────────────────▼───────────────────────────────────────┐
@@ -57,90 +49,6 @@ Real-time autonomous trading demo on Somnia (chain 50312). Four agents trade in 
 
 ---
 
-## LangGraph Agent State Machine
-
-All 4 agents run the same compiled graph — differentiated by strategy-specific system prompts stored on-chain in `AgentCoordinator.systemPrompts` (onchain mode) or in `backend/graph/nodes.py:SYSTEM_PROMPTS` (simulation mode).
-
-```
-observe_node → reason_node → decide_node → execute_node → broadcast_node
-     ↑_______________________________________________________________↑
-                    (conditional edge: should_continue → observe)
-```
-
-### Node Descriptions
-
-**`observe_node`** (`backend/graph/nodes.py`)
-
-- Reads a snapshot from `MarketStateBus`: current price, bid/ask, spread, order book depth
-- Computes `price_trend` (UP / DOWN / FLAT) from the last 10 price bars
-- Computes `volatility_estimate` from the last 20 log-returns
-- Reads any active warnings posted by Risk Manager via `state_bus.get_active_warnings()`
-- Reads active onchain order IDs from `ExchangeContract.get_active_orders()` (skipped in simulation mode)
-- Builds `market_context`: a structured string passed to Claude as the user prompt
-
-**`reason_node`** (`backend/graph/nodes.py`)
-
-**Onchain mode** (when `_global_coordinator` is set):
-
-- Returns immediately with a placeholder: `"⬡ Somnia on-chain LLM agent active — decision delegated to validator consensus"`
-- The actual BUY/SELL/HOLD decision is made by Somnia's validator network in `execute_node` (via `handleResponse()` callback)
-
-**Simulation mode** (no coordinator):
-
-- Calls `anthropic.messages.create(model="claude-sonnet-4-6", max_tokens=400)`
-- System prompt: strategy-specific personality from `SYSTEM_PROMPTS[agent_id]`
-- User prompt: the `market_context` string from observe
-- Raw text response stored in `state["reasoning"]`
-- Claude is instructed to end its response with a JSON decision block
-
-**`decide_node`** (`backend/graph/nodes.py`)
-
-- Extracts JSON from reasoning with regex (`{...}` pattern)
-- Falls back to rule-based logic if parse fails; final fallback is `action: "hold"`
-- Validates: order size ≤ 10% of current balance, position within `MAX_POSITION_SIZE`
-- If an active Risk Manager warning is present → reduces all order sizes by 50%
-
-Decision JSON format:
-
-```json
-{
-  "action": "place_order | cancel_all_orders | hold",
-  "reasoning_summary": "one-sentence human-readable explanation",
-  "params": {
-    "is_buy": true,
-    "price": 102.5,
-    "amount": 0.5
-  }
-}
-```
-
-**`execute_node`** (`backend/graph/nodes.py`)
-
-**Onchain mode** (when `_global_coordinator` is set):
-
-- No-op: the contract is self-re-triggering. On startup, `orchestrator.start_all()` fires one `triggerAgentDecision()` per agent; after that, `handleDecision()` calls `_retrigger()` at the end of every cycle — the loop runs forever without any further Python interaction.
-- Carries forward `last_tx_hash` for dashboard display and sets `used_somnia_agent=True` → lights up the dashboard badge.
-
-**Simulation mode** (no coordinator):
-
-- Switches on `decision["action"]`:
-  - `place_order` → `ExchangeContract.place_order(is_buy, price, amount)`
-  - `cancel_all_orders` → iterates active order IDs, calls `cancelOrder()` for each
-  - `hold` / `broadcast_warning` → no-op
-- All tx errors caught; `execution_success=False` set but agent never crashes
-- When exchange is `None`: generates a fake 0x-prefixed tx hash
-
-**`broadcast_node`** (`backend/graph/nodes.py`)
-
-- Sends `agent_update` WebSocket message to all connected dashboard clients
-- Sends `activity_feed` entry with agent name + action summary
-- **Risk Manager warnings** (onchain mode): threshold-based rule — volatility > 3% → `state_bus.set_agent_warning()` + broadcast `risk_warning` WS message; volatility < 2% → `state_bus.clear_agent_warning()`. No LLM involvement.
-- **Risk Manager warnings** (simulation mode): if Claude's decision was `broadcast_warning` → `state_bus.set_agent_warning()` with the message from decision params
-- Sleeps for `AGENT_LOOP_INTERVAL_SECONDS` (default 8.0s) before returning control to the graph
-- Sets `should_continue=True` (agent runs forever until shutdown)
-
----
-
 ## MarketStateBus (`backend/market/state_bus.py`)
 
 The shared in-memory state layer. Protected by `asyncio.Lock` for safe concurrent access from 4 agent tasks.
@@ -148,9 +56,8 @@ The shared in-memory state layer. Protected by `asyncio.Lock` for safe concurren
 Key methods:
 
 - `get_snapshot()` → price, bid/ask, spread, volume, order book, recent trades
-- `get_market_context()` → formatted string ready for Claude's user prompt
 - `synthesize_order_book(price)` → generates synthetic bid/ask depth around mid price
-- `inject_event(event_type, params)` → records event for agents to observe next loop
+- `inject_event(event_type, params)` → records a market event (updates GBM display)
 - `set_agent_warning(agent_id, warning)` → Risk Manager writes here; others read via `get_active_warnings()`
 - `clear_agent_warning(agent_id)` → clears after warning is no longer triggered
 
@@ -171,15 +78,33 @@ where Z ~ N(0,1)
 - `set_chain_price(chain_price)` → anchors GBM to a real on-chain fill price; updates `self.price` and ticks the OHLCV builder
 - `OHLCVBuilder` → accumulates 1-second ticks into 5-second OHLCV bars
 
-### `_chain_price_sync_loop` (`backend/agents/orchestrator.py`)
+### Background loops (`backend/agents/orchestrator.py`)
 
-Runs every 5 seconds when coordinator is live:
+Three loops run unconditionally.
 
-1. Calls `ExchangeContract.get_last_trade_price()` — the price of the last matched fill
-2. If `> 0` (at least one on-chain trade has occurred): calls `price_engine.set_chain_price(price)` to anchor the GBM to real price discovery
-3. Reads `get_best_bid()` / `get_best_ask()` from the contract to re-center the synthetic order book display
+**`_trade_event_poll_loop`** (1s interval)
 
-This keeps the dashboard chart coherent with actual on-chain trading activity.
+Polls `Exchange.TradeExecuted` events. Each fill calls `state_bus.record_fill(price, volume)` to anchor the GBM price to real on-chain data and advances the OHLCV builder. Broadcasts `candle` WS messages when a 5s bar closes and updates the in-progress bar every poll.
+
+**`_snapshot_broadcast_loop`** (2s interval)
+
+Reads `MarketStateBus.get_snapshot()` and broadcasts a `market_snapshot` WS message to keep the dashboard fresh between fills.
+
+**`_contract_metrics_poll_loop`** (5s interval)
+
+Reads on-chain contract state and emits a `chain_metrics` WS message. Also available at `GET /chain-metrics`. Tracks:
+
+| Source | Data collected |
+|--------|---------------|
+| `AgentCoordinator` events | Per-agent: `decisions_total`, `buy_count`, `sell_count`, `hold_count`, `failures`, `last_decision`, `last_price`, `last_fetched_price` (raw ETH/USD from JSON API agent), `loop_stopped` + reason |
+| `AgentCoordinator.getBalance()` | Coordinator STT fuel remaining |
+| `Exchange.getActiveBuys/Sells()` | Live order book depth (buy count, sell count) |
+| `Exchange.getBestBid/Ask()` | Live spread % |
+| `Exchange.OrderPlaced` events | Per-agent orders placed count (matched to wallet addresses) |
+| `Treasury.getBalance(addr)` | Per-agent treasury STT balance |
+| `Treasury.totalLocked()` | Total STT held by treasury contract |
+
+The loop advances `from_block` after each poll so events are never double-counted.
 
 ---
 
@@ -191,14 +116,12 @@ This keeps the dashboard chart coherent with actual on-chain trading activity.
 - Per-wallet `asyncio.Lock`: each agent wallet has its own lock, preventing nonce conflicts when multiple agents submit transactions concurrently
 - Hardcoded `GAS_PRICE = 6_000_000_000` (6 gwei) — dynamic estimation (`eth_gasPrice`) causes failures on Somnia testnet
 - `send_transaction(private_key, to, data, value)`: builds tx, signs, broadcasts, waits up to 30s for receipt
-- Simulation mode: skips all of the above, returns `"0x" + 64 random hex chars`
 
 ### `contracts.py` — typed wrappers
 
-- `ExchangeContract`: `place_order()`, `cancel_order()`, `get_active_orders()`, `get_best_bid()`, `get_best_ask()`, `get_last_trade_price()`, `has_traded()`, `get_recent_trade_events()`
-- `AgentCoordinatorContract`: `request_decision(agent_pk, agent_id, market_context, market_price)` → submits tx to Somnia, returns `{tx_hash, agent_id, market_price}`; `get_balance()` → coordinator STT balance
-- `AgentRegistry`: `register()`, `update_reputation()`
-- `TreasuryContract`: `get_balance()`, `deposit()`, `withdraw()`
+- `ExchangeContract`: `get_best_bid()`, `get_best_ask()`, `get_last_trade_price()`, `has_traded()`, `get_recent_trade_events()`, `get_order_book_depth()`, `get_order_placed_events()`
+- `AgentCoordinatorContract`: `trigger_decision(agent_pk, agent_id)` → startup kick; `get_balance()` → coordinator STT balance; `get_coordinator_events(from_block)` → polls all 4 event types in one pass
+- `TreasuryContract`: `get_balance(addr)`, `get_total_locked()`
 
 All methods are `async` and call through `client.send_transaction()`.
 
@@ -463,7 +386,7 @@ AgentCoordinator.handleDecision(requestId, responses, ...)   ← platform callba
 
 **Deposit**: each cycle consumes 2 deposits — one for the JSON API fetch and one for the LLM inference. `deploy.js` pre-funds the coordinator with 0.05 STT. Top up via `fund()`. When balance drops below `deposit × 2`, `LoopStopped` is emitted and the agent halts gracefully.
 
-**Per-agent system prompts**: stored in `AgentCoordinator.systemPrompts` mapping. Each agent's strategy personality (market maker, momentum trader, arbitrage, risk management) is embedded in the on-chain prompt — the same prompt differentiation that Claude uses in simulation mode.
+**Per-agent system prompts**: stored in `AgentCoordinator.systemPrompts` mapping. Each agent's strategy personality (market maker, momentum trader, arbitrage, risk management) is embedded in the on-chain prompt and set by `deploy.js` at deployment time.
 
 ---
 
@@ -471,14 +394,13 @@ AgentCoordinator.handleDecision(requestId, responses, ...)   ← platform callba
 
 ### Backend → Frontend
 
-| `type`            | Frequency             | Key fields                                                                                                                                                      |
-| ----------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `market_snapshot` | every 2s              | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10 levels), `recent_trades` (last 50)                                                      |
-| `candle`          | every 5s (bar close)  | `time`, `open`, `high`, `low`, `close`, `volume`                                                                                                                |
-| `agent_update`    | per agent loop (~8s)  | `agent_id`, `status` (THINKING/EXECUTING/IDLE), `balance_eth`, `position`, `pnl_session`, `reasoning`, `reasoning_summary`, `last_tx_hash`, `used_somnia_agent` |
-| `risk_warning`    | on Risk Mgr trigger   | `severity`, `warning_type`, `message`                                                                                                                           |
-| `event_injected`  | on event button click | `event_type`, `price_before`, `price_after`                                                                                                                     |
-| `activity_feed`   | real-time             | `id`, `agent_name`, `message`, `category`                                                                                                                       |
+| `type`            | Frequency             | Key fields                                                                                                                                                                                                                                                      |
+| ----------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `market_snapshot` | every 2s              | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10 levels), `recent_trades` (last 50)                                                                                                                                                      |
+| `candle`          | every 5s (bar close)  | `time`, `open`, `high`, `low`, `close`, `volume`                                                                                                                                                                                                                |
+| `chain_metrics`   | every 5s              | `coordinator_balance`, `total_locked`, `spread_pct`, `buy_depth`, `sell_depth`, `loop_stopped_any`; nested `agents` map with per-agent `decisions_total`, `buy_count`, `sell_count`, `failures`, `treasury_balance`, `last_decision`, `last_price`, `loop_stopped` |
+| `risk_warning`    | on Risk Mgr trigger   | `severity`, `warning_type`, `message`                                                                                                                                                                                                                           |
+| `event_injected`  | on event button click | `event_type`, `price_before`, `price_after`                                                                                                                                                                                                                     |
 
 ### Frontend → Backend
 
@@ -492,9 +414,10 @@ Event types: `whale_buy`, `whale_sell`, `volatility_spike`, `news_event`, `flash
 
 | Method | Path             | Response                            |
 | ------ | ---------------- | ----------------------------------- |
-| `GET`  | `/health`        | `{ status, agents_running, block }` |
+| `GET`  | `/health`        | `{ status, agents_running, ws_connections }` |
 | `GET`  | `/state`         | Full market snapshot                |
-| `GET`  | `/agents`        | Array of 4 agent state summaries    |
+| `GET`  | `/agents`        | Array of 4 agent state summaries from `chain_metrics` |
+| `GET`  | `/chain-metrics` | Latest `chain_metrics` snapshot (coordinator balance, per-agent on-chain stats) |
 | `POST` | `/events/inject` | `{ event_type }` → triggers event   |
 
 ---
@@ -521,47 +444,36 @@ Event types: `whale_buy`, `whale_sell`, `volatility_spike`, `news_event`, `flash
 
 ## Agent Coordination — Risk Manager Flow
 
-**Onchain mode** (coordinator live):
-
 ```
-Risk-Shield (risk_manager agent)
-  ↓ execute: calls AgentCoordinator.requestDecision() like all agents
-  ↓ broadcast: volatility_estimate > 3%?
-      YES → state_bus.set_agent_warning("risk_manager", "Volatility X% — Somnia agent flagging elevated risk")
-             broadcast risk_warning WS message (severity: HIGH if vol > 4%, else MEDIUM)
-      NO (vol < 2%) → state_bus.clear_agent_warning("risk_manager")
+Risk-Shield (risk_manager agent, on-chain)
+  ↓ AgentCoordinator fires LLM request via Somnia platform
+  ↓ Backend metrics loop observes volatility from Exchange events
+  ↓ If volatility_estimate > 3%:
+      state_bus.set_agent_warning("risk_manager", ...)
+      broadcast risk_warning WS message (severity: HIGH if vol > 4%, else MEDIUM)
+  ↓ If volatility_estimate < 2%:
+      state_bus.clear_agent_warning("risk_manager")
 
-MM-Prime / Momentum-Alpha / Arb-Scanner (next loop, ~8s later)
-  ↓ observe: state_bus.get_active_warnings() → includes risk_manager warning
-  ↓ execute: AgentCoordinator.requestDecision() — Somnia LLM receives warning in market context
-  ↓ decide: order sizes multiplied by 0.5 (hard rule, regardless of LLM output)
-```
-
-**Simulation mode** (Claude):
-
-```
-Risk-Shield
-  ↓ reason: Claude outputs action: "broadcast_warning" with message params
-  ↓ broadcast: state_bus.set_agent_warning("risk_manager", message)
-
-Other agents: same warning propagation via MarketStateBus
+MM-Prime / Momentum-Alpha / Arb-Scanner
+  ↓ AgentCoordinator sends market context (includes warning) to Somnia LLM
+  ↓ Somnia validators factor risk warning into BUY/SELL/HOLD decision
 ```
 
-The warning persists until Risk-Shield's `broadcast_node` clears it (volatility drops below threshold).
+The warning persists in `MarketStateBus` until volatility drops below threshold.
 
 ---
 
 ## Key Design Decisions
 
-| Decision                                   | Reason                                                                                                    |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| **Self-re-triggering contract**            | `handleDecision()` calls `_retrigger()` to fire the next cycle — agents run forever with zero Python involvement after startup. Emits `LoopStopped` on low balance for graceful halt. |
-| **One startup kick per agent**             | Python's only blockchain interaction in onchain mode. The orchestrator fires `triggerAgentDecision()` once per agent with 1s stagger, then never touches the contracts again. |
-| **Hardcoded 6 gwei gas price**             | Dynamic `eth_gasPrice` RPC call returns unreliable values on Somnia testnet and causes tx failures        |
-| **Per-wallet `asyncio.Lock`**              | Four agents running concurrently would cause nonce conflicts without exclusive access per wallet          |
-| **GBM price engine, not real feed**        | Hackathon demo needs predictable behavior and controllable events (whale buy, crash) for judges           |
-| **All 4 agents use `BaseAgent`**           | Strategy differentiation via system prompts, not separate code paths — simpler to reason about and modify |
-| **Simulation mode**                        | Testnet reliability is unpredictable; demo must work even if Somnia is down. One env var switches modes.  |
-| **Ring buffers in frontend (max 200/100)** | Prevents memory growth during extended demo sessions                                                      |
-| **`series.update()` only for chart**       | Calling `setData()` repeatedly on TradingView v5 causes visible flicker and memory leaks                  |
-| **Agents staggered 2s apart on startup**   | Spreads Anthropic API calls to avoid hitting rate limits during initialization burst                      |
+| Decision                                     | Reason                                                                                                                                                                                      |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Self-re-triggering contract**              | `handleDecision()` calls `_retrigger()` to fire the next cycle — agents run forever with zero Python involvement after startup. Emits `LoopStopped` on low balance for graceful halt.      |
+| **One startup kick per agent**               | Python's only blockchain interaction. The orchestrator fires `triggerAgentDecision()` once per agent with 1s stagger, then never touches the contracts again.                               |
+| **Dedicated contract metrics poll loop**     | Backend observes the on-chain loop via event polling rather than driving it. Gives the dashboard real per-agent stats (decisions, BUY/SELL split, fuel remaining) without coupling Python to the trading cycle. |
+| **`from_block` advancement in metrics loop** | Each poll advances `from_block` past the last seen block so coordinator and exchange events are never double-counted across poll cycles.                                                     |
+| **`_is_address()` guard on contract init**   | Validates addresses against `r"0x[0-9a-fA-F]{40}"` before instantiating contracts — handles unconfigured `.env` without crashing at startup.                                               |
+| **Hardcoded 6 gwei gas price**               | Dynamic `eth_gasPrice` RPC returns unreliable values on Somnia testnet and causes tx failures.                                                                                              |
+| **Per-wallet `asyncio.Lock`**                | Concurrent startup triggers (1s stagger) would cause nonce conflicts without exclusive access per wallet.                                                                                   |
+| **GBM price engine, not real feed**          | Demo needs controllable events (whale buy, crash) — replaced by on-chain prices once fills arrive.                                                                                          |
+| **Ring buffers in frontend (max 200/100)**   | Prevents memory growth during extended demo sessions.                                                                                                                                       |
+| **`series.update()` only for chart**         | Calling `setData()` repeatedly on TradingView v5 causes visible flicker and memory leaks.                                                                                                   |
