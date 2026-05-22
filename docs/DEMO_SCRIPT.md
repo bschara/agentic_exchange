@@ -85,13 +85,13 @@ _Chart spikes +3% immediately._
 
 Wait 8-16 seconds for agents to react. Then point to the reasoning panels:
 
-> "Momentum-Alpha: 'Price breakout detected above 5-bar high, entering long position.'"
+> "Momentum-Alpha just went long — reference price is above the on-chain last trade, pure momentum."
 
-> "Risk-Shield just sent a warning: 'Elevated volatility, all agents reduce position sizes.'"
+> "Arb-Scanner is buying — it sees the on-chain price is below CoinGecko reference, gap to close."
 
-> "MM-Prime received that warning and widened its spread from 0.2% to 0.8%."
+> "Risk-Shield held steady — its on-chain price check was within $5 of reference, so it follows momentum."
 
-> "Three agents. Three autonomous decisions. Three onchain transactions. No human input."
+> "Four agents. Four autonomous decisions. Four onchain transactions. No human input."
 
 ---
 
@@ -103,9 +103,11 @@ Click **FLASH CRASH**.
 
 Watch agents scramble — activity feed lights up.
 
-> "The risk manager just triggered a high-severity warning. The momentum trader is cancelling its long. The arbitrage agent is looking for gaps to exploit."
+> "Watch the scoreboard — P&L is shifting. Arb-Scanner is buying the dip. Momentum-Alpha just flipped short."
 
-> "This is what agent-to-agent coordination looks like. Risk Shield broadcasts a message into the shared state bus. Every other agent observes it on their next loop."
+> "Risk-Shield's on-chain price is now more than $5 below reference — it kicks in to support the market with a buy order."
+
+> "Each agent is reacting to the same market signal but through a different strategy lens. All autonomous. All on-chain."
 
 ---
 
@@ -123,7 +125,7 @@ Watch agents scramble — activity feed lights up.
 
 ## Minute 5:00 — Close strong
 
-> "Agentic Exchange: autonomous AI agents, real Claude reasoning, real onchain transactions, real-time dashboard. Live right now on Somnia chain 50312."
+> "Agentic Exchange: autonomous AI agents, on-chain LLM consensus, real onchain transactions, real-time dashboard. Live right now on Somnia chain 50312."
 
 > "The future of DeFi isn't humans clicking buttons. It's agents like these, running 24/7, collaborating and competing, executing in real-time."
 
@@ -136,7 +138,7 @@ Watch agents scramble — activity feed lights up.
 - **"Is this simulated?"** → No. Every tx hash links to a real Somnia explorer entry. The price engine is GBM-based (for smooth animation), but when onchain, it anchors to real fill prices from Exchange.sol every 5 seconds. All orders and trades are onchain.
 - **"Does Python keep calling the contract every loop?"** → No. Python fires one `triggerAgentDecision()` per agent at startup — that's it. After that, `handleDecision()` calls `_retrigger()` at the end of each cycle to fire the next one on-chain. The backend's only remaining jobs are the WebSocket dashboard and the event injection buttons.
 - **"What happens if the coordinator runs out of STT?"** → It emits `LoopStopped(agentId, "Insufficient balance", balance)` and stops gracefully. No crash. Just fund it again via `AgentCoordinator.fund()` and fire a new `triggerAgentDecision()` to restart.
-- **"What is the `⬡ ON-CHAIN LLM` badge?"** → Each agent card shows this badge, indicating the agent's decisions are being made by Somnia's decentralized LLM inference agent — multi-validator consensus, fully on-chain.
+- **"What is the `⬡ ON-CHAIN LLM` badge?"** → Each agent card shows this badge indicating the agent's decisions are validated by Somnia's decentralized LLM inference agent — multi-validator consensus, fully on-chain. The Agent Scoreboard below shows real-time P&L ranking.
 - **"What model powers the agents?"** → Somnia's on-chain LLM Inference Agent (base agent ID 2) — multi-validator consensus across Somnia's decentralized network. Each agent's strategy system prompt is stored in `AgentCoordinator.systemPrompts` and set at deploy time.
-- **"How does agent coordination work?"** → Risk Manager's on-chain agent monitors volatility via `chain_metrics`. When it exceeds 3%, the backend writes a warning to `MarketStateBus` and broadcasts a `risk_warning` WS message to the dashboard. The Somnia LLM receives this warning as part of the market context string on the next decision cycle.
+- **"How does agent coordination work?"** → Each agent uses a different strategy encoded in its on-chain system prompt. They don't communicate directly — they all react to the same on-chain market state (last trade price vs CoinGecko reference, best bid/ask). The interplay emerges naturally from their different strategies acting on the same data.
 - **"What happens if the coordinator runs out of fuel?"** → `_retrigger()` checks `address(this).balance >= deposit × 2` before firing the next cycle. If underfunded, it emits `LoopStopped(agentId, "Insufficient balance", balance)` and halts gracefully. Fund via `AgentCoordinator.fund()` and restart.

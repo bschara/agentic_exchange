@@ -55,11 +55,11 @@ The shared in-memory state layer. Protected by `asyncio.Lock` for safe concurren
 
 Key methods:
 
-- `get_snapshot()` → price, bid/ask, spread, volume, order book, recent trades
-- `synthesize_order_book(price)` → generates synthetic bid/ask depth around mid price
-- `inject_event(event_type, params)` → records a market event (updates GBM display)
-- `set_agent_warning(agent_id, warning)` → Risk Manager writes here; others read via `get_active_warnings()`
-- `clear_agent_warning(agent_id)` → clears after warning is no longer triggered
+- `get_snapshot()` → price, bid/ask, spread, volume, order book (rebuilt from on-chain data), recent trades
+- `record_fill(price, volume, buyer_id, seller_id)` → anchors GBM to real on-chain fill, advances OHLCV builder
+- `set_order_book(bids, asks)` → rebuilds in-memory book from on-chain order data (called every 5s by metrics loop)
+- `inject_event(event_type, params)` → records a market event
+- `set_agent_warning(agent_id, warning)` / `clear_agent_warning(agent_id)` → warning state storage
 
 ---
 
@@ -396,11 +396,10 @@ AgentCoordinator.handleDecision(requestId, responses, ...)   ← platform callba
 
 | `type`            | Frequency             | Key fields                                                                                                                                                                                                                                                      |
 | ----------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `market_snapshot` | every 2s              | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10 levels), `recent_trades` (last 50)                                                                                                                                                      |
+| `market_snapshot` | every 2s              | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10 levels), `recent_trades` (last 50, each with `buyer_agent`/`seller_agent`)                                                                                                             |
 | `candle`          | every 5s (bar close)  | `time`, `open`, `high`, `low`, `close`, `volume`                                                                                                                                                                                                                |
-| `chain_metrics`   | every 5s              | `coordinator_balance`, `total_locked`, `spread_pct`, `buy_depth`, `sell_depth`, `loop_stopped_any`; nested `agents` map with per-agent `decisions_total`, `buy_count`, `sell_count`, `failures`, `treasury_balance`, `last_decision`, `last_price`, `loop_stopped` |
-| `risk_warning`    | on Risk Mgr trigger   | `severity`, `warning_type`, `message`                                                                                                                                                                                                                           |
-| `event_injected`  | on event button click | `event_type`, `price_before`, `price_after`                                                                                                                                                                                                                     |
+| `chain_metrics`   | every 5s              | `coordinator_balance`, `total_locked`, `spread_pct`, `buy_depth`, `sell_depth`, `loop_stopped_any`, `recent_fills`, `somnia_block_ms`; nested `agents` map with per-agent: `decisions_total`, `buy_count`, `sell_count`, `hold_count`, `failures`, `orders_placed`, `treasury_balance`, `last_decision`, `last_price`, `last_fetched_price`, `last_order_id`, `loop_stopped`, `loop_stopped_reason`, `trade_pnl`, `total_buy_volume`, `total_sell_volume`, `avg_decision_latency_ms` |
+| `event_injected`  | on event button click | `event_type`, `description`, `price_before`, `price_after`, `timestamp`                                                                                                                                                                                        |
 
 ### Frontend → Backend
 
@@ -412,13 +411,15 @@ Event types: `whale_buy`, `whale_sell`, `volatility_spike`, `news_event`, `flash
 
 ### HTTP Endpoints
 
-| Method | Path             | Response                            |
-| ------ | ---------------- | ----------------------------------- |
-| `GET`  | `/health`        | `{ status, agents_running, ws_connections }` |
-| `GET`  | `/state`         | Full market snapshot                |
-| `GET`  | `/agents`        | Array of 4 agent state summaries from `chain_metrics` |
-| `GET`  | `/chain-metrics` | Latest `chain_metrics` snapshot (coordinator balance, per-agent on-chain stats) |
-| `POST` | `/events/inject` | `{ event_type }` → triggers event   |
+| Method | Path               | Response                            |
+| ------ | ------------------ | ----------------------------------- |
+| `GET`  | `/health`          | `{ status, agents_running, ws_connections }` |
+| `GET`  | `/state`           | Full market snapshot                |
+| `GET`  | `/agents`          | Array of 4 agent state summaries from `chain_metrics` |
+| `GET`  | `/chain-metrics`   | Latest `chain_metrics` snapshot (coordinator balance, per-agent on-chain stats) |
+| `POST` | `/events/inject`   | `{ event_type }` → triggers event   |
+| `POST` | `/agents/trigger`  | Re-fires `triggerAgentDecision()` for all 4 agents — use if loops stalled |
+| `GET`  | `/debug/config`    | Non-sensitive config values + whether `AgentCoordinator` is initialized |
 
 ---
 
@@ -433,8 +434,11 @@ Event types: `whale_buy`, `whale_sell`, `volatility_spike`, `news_event`, `flash
 
 ### `agentStore`
 
-- `agents: Record<agent_id, AgentState>` — latest state for each of 4 agents
-- `reasoningHistory: Record<agent_id, string[]>` — last 20 reasoning texts per agent
+- `agents: Record<agent_id, AgentState>` — latest state for each of 4 agents; updated on every `chain_metrics` message
+- `decisionHistory: Record<agent_id, string[]>` — last 20 `"BUY @ $3245"` entries per agent, derived from `chain_metrics` diffs
+- `coordinatorBalance`, `totalLocked`, `loopStoppedAny`, `recentFills`, `somniaBlockMs` — top-level metrics from `chain_metrics`
+
+`AgentScoreboard` (`components/agents/AgentScoreboard.tsx`) ranks all 4 agents by `trade_pnl` in real-time and displays buy/sell volume and avg decision latency (`avg_decision_latency_ms`).
 
 ### `feedStore`
 
@@ -472,6 +476,7 @@ The warning persists in `MarketStateBus` until volatility drops below threshold.
 | **Dedicated contract metrics poll loop**     | Backend observes the on-chain loop via event polling rather than driving it. Gives the dashboard real per-agent stats (decisions, BUY/SELL split, fuel remaining) without coupling Python to the trading cycle. |
 | **`from_block` advancement in metrics loop** | Each poll advances `from_block` past the last seen block so coordinator and exchange events are never double-counted across poll cycles.                                                     |
 | **`_is_address()` guard on contract init**   | Validates addresses against `r"0x[0-9a-fA-F]{40}"` before instantiating contracts — handles unconfigured `.env` without crashing at startup.                                               |
+| **`_load_local_deployment()`**               | On startup, reads `contracts/deployments/somnia-local.json` and injects contract addresses + agent PKs into `settings` if `.env` has placeholder values. Enables zero-config local dev: deploy with `deploy-local.js`, start with `./start.sh`, done. |
 | **Hardcoded 6 gwei gas price**               | Dynamic `eth_gasPrice` RPC returns unreliable values on Somnia testnet and causes tx failures.                                                                                              |
 | **Per-wallet `asyncio.Lock`**                | Concurrent startup triggers (1s stagger) would cause nonce conflicts without exclusive access per wallet.                                                                                   |
 | **GBM price engine, not real feed**          | Demo needs controllable events (whale buy, crash) — replaced by on-chain prices once fills arrive.                                                                                          |

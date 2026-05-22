@@ -13,19 +13,18 @@ backend/
 ├── requirements.txt         # Python dependencies (pinned)
 ├── .env                     # Secret keys — NOT committed (see .gitignore)
 ├── agents/
-│   └── orchestrator.py      # Agent wallet registry, poll loops, metrics loop, startup triggers
+│   └── orchestrator.py      # Agent wallet registry, poll loops, metrics loop, startup triggers, _load_local_deployment()
 ├── market/
 │   ├── price_engine.py      # GBM price simulation + OHLCVBuilder (5s bars)
 │   ├── order_book.py        # In-memory bid/ask depth (BookEntry, OrderBook)
 │   └── state_bus.py         # Async-safe shared state: price, order book, warnings, events
 ├── blockchain/
 │   ├── client.py            # Web3 singleton, per-wallet nonce Lock, send_transaction()
-│   └── contracts.py         # Typed wrappers: ExchangeContract, TreasuryContract
+│   └── contracts.py         # Typed wrappers: ExchangeContract, TreasuryContract, AgentCoordinatorContract
 └── api/
     ├── websocket_hub.py     # ConnectionManager: broadcast() to all WS clients
     ├── routes_ws.py         # /ws WebSocket endpoint + message dispatch
-    ├── routes_http.py       # GET /health, GET /state, GET /agents, GET /chain-metrics, POST /events/inject
-    └── schemas.py           # Pydantic request/response models
+    └── routes_http.py       # REST endpoints (health, state, agents, chain-metrics, events, trigger, debug)
 ```
 
 ---
@@ -60,20 +59,21 @@ All settings live in `config.py` (Pydantic Settings) and are loaded from `backen
 
 | Variable                    | Default                            | Required     | Purpose                                                                               |
 | --------------------------- | ---------------------------------- | ------------ | ------------------------------------------------------------------------------------- |
-| `SOMNIA_RPC_URL`            | `https://dream-rpc.somnia.network` | No           | Somnia testnet RPC endpoint                                                           |
-| `SOMNIA_CHAIN_ID`           | `50312`                            | No           | Somnia chain ID                                                                       |
-| `EXCHANGE_ADDRESS`          | `0x000...000`                      | **Yes**      | Deployed Exchange.sol address                                                         |
-| `AGENT_REGISTRY_ADDRESS`    | `0x000...000`                      | **Yes**      | Deployed AgentRegistry.sol address                                                    |
-| `TREASURY_ADDRESS`          | `0x000...000`                      | **Yes**      | Deployed Treasury.sol address                                                         |
-| `AGENT_COORDINATOR_ADDRESS` | `0x000...000`                      | **Yes**      | Deployed AgentCoordinator.sol address; triggers self-sustaining on-chain agent loops  |
-| `MARKET_MAKER_PK`           | `0x000...000`                      | **Yes**      | Market Maker agent wallet private key                                                 |
-| `MOMENTUM_TRADER_PK`        | `0x000...000`                      | **Yes**      | Momentum Trader wallet private key                                                    |
-| `ARBITRAGE_AGENT_PK`        | `0x000...000`                      | **Yes**      | Arb Scanner wallet private key                                                        |
-| `RISK_MANAGER_PK`           | `0x000...000`                      | **Yes**      | Risk Shield wallet private key                                                        |
-| `INITIAL_PRICE`             | `100.0`                            | No           | Starting price for GBM chart (until real trades come in)                              |
-| `PRICE_VOLATILITY`          | `0.025`                            | No           | GBM base volatility (σ)                                                               |
-| `PRICE_DRIFT`               | `0.0002`                           | No           | GBM drift (μ)                                                                         |
+| `SOMNIA_RPC_URL`            | `https://dream-rpc.somnia.network` | No           | Somnia RPC endpoint (`http://127.0.0.1:8545` for local Hardhat)                      |
+| `SOMNIA_CHAIN_ID`           | `50312`                            | No           | Somnia chain ID (`31337` for local Hardhat)                                           |
+| `EXCHANGE_ADDRESS`          | `0x000...000`                      | **Yes**\*    | Deployed Exchange.sol address                                                         |
+| `AGENT_REGISTRY_ADDRESS`    | `0x000...000`                      | **Yes**\*    | Deployed AgentRegistry.sol address                                                    |
+| `TREASURY_ADDRESS`          | `0x000...000`                      | **Yes**\*    | Deployed Treasury.sol address                                                         |
+| `AGENT_COORDINATOR_ADDRESS` | `0x000...000`                      | **Yes**\*    | Deployed AgentCoordinator.sol address; triggers self-sustaining on-chain agent loops  |
+| `MARKET_MAKER_PK`           | `0x000...000`                      | **Yes**\*    | Market Maker agent wallet private key                                                 |
+| `MOMENTUM_TRADER_PK`        | `0x000...000`                      | **Yes**\*    | Momentum Trader wallet private key                                                    |
+| `ARBITRAGE_AGENT_PK`        | `0x000...000`                      | **Yes**\*    | Arb Scanner wallet private key                                                        |
+| `RISK_MANAGER_PK`           | `0x000...000`                      | **Yes**\*    | Risk Shield wallet private key                                                        |
+| `INITIAL_PRICE`             | `3500.0`                           | No           | Starting price for GBM chart (until real trades come in)                              |
+| `SOMNIA_BLOCK_MS`           | `0`                                | No           | Somnia block time in ms — used to compute `avg_decision_latency_ms`. Set to `400` for testnet, `0` for local Hardhat (instant blocks). |
 | `FRONTEND_URL`              | `http://localhost:3000`            | No           | Allowed CORS origin                                                                   |
+
+\* **Local dev auto-load:** if `SOMNIA_RPC_URL` points to localhost and addresses/PKs are placeholder zeros, `_load_local_deployment()` automatically reads `contracts/deployments/somnia-local.json` (written by `deploy-local.js`) and injects the real values at startup. You only need to set `SOMNIA_RPC_URL=http://127.0.0.1:8545` in `.env`.
 
 **Contracts activate automatically** when addresses in `.env` are valid 20-byte hex strings (not placeholders). On startup the orchestrator fires one `triggerAgentDecision()` per agent; after that the contract self-re-triggers and Python never touches the contracts again.
 
@@ -97,26 +97,42 @@ When `_coordinator` is set, it additionally fires one `triggerAgentDecision()` p
 
 ```python
 {
-  "coordinator_balance": float,   # STT remaining in AgentCoordinator
-  "total_locked": float,          # total STT in Treasury
-  "spread_pct": float,            # live (ask - bid) / bid × 100
-  "buy_depth": int,               # active buy order count in Exchange
-  "sell_depth": int,              # active sell order count in Exchange
-  "loop_stopped_any": bool,       # true if any agent emitted LoopStopped
+  "coordinator_balance": float,       # STT remaining in AgentCoordinator
+  "total_locked": float,              # total STT in Treasury
+  "spread_pct": float,                # live (ask - bid) / bid × 100
+  "buy_depth": int,                   # active buy order count in Exchange
+  "sell_depth": int,                  # active sell order count in Exchange
+  "loop_stopped_any": bool,           # true if any agent emitted LoopStopped
+  "somnia_block_ms": int,             # from config — used by frontend for latency display
+  "recent_fills": [                   # last 20 matched trades, newest first
+    {
+      "price": float,
+      "amount": float,
+      "buyer_agent": str,             # agent_id or "external"
+      "seller_agent": str,
+      "block": int,
+    }
+  ],
   "agents": {
     "<agent_id>": {
-      "decisions_total": int,     # DecisionExecuted + DecisionFailed events
-      "buy_count": int,           # DecisionExecuted where decision == "BUY"
-      "sell_count": int,          # DecisionExecuted where decision == "SELL"
-      "hold_count": int,          # DecisionExecuted where decision == "HOLD"
-      "failures": int,            # DecisionFailed events
-      "orders_placed": int,       # OrderPlaced events from this agent's wallet
-      "treasury_balance": float,  # Treasury.getBalance(wallet)
-      "last_decision": str,       # "BUY" | "SELL" | "HOLD" | null
-      "last_price": float,        # price from last DecisionExecuted
-      "last_fetched_price": float,# raw ETH/USD from last LLMRequestFired
-      "loop_stopped": bool,       # true if LoopStopped emitted for this agent
-      "loop_stopped_reason": str  # reason string from LoopStopped event
+      "decisions_total": int,         # total DecisionExecuted events
+      "buy_count": int,
+      "sell_count": int,
+      "hold_count": int,
+      "failures": int,                # DecisionFailed events
+      "orders_placed": int,           # OrderPlaced events from this agent's wallet
+      "treasury_balance": float,      # Treasury.getBalance(wallet) in ETH
+      "last_decision": str,           # "BUY" | "SELL" | "HOLD" | null
+      "last_price": float,            # price from last DecisionExecuted
+      "last_fetched_price": float,    # raw ETH/USD from last LLMRequestFired
+      "last_order_id": int | null,    # orderId from last DecisionExecuted
+      "loop_stopped": bool,
+      "loop_stopped_reason": str,
+      "trade_pnl": float,             # running P&L from TradeExecuted events (sell vol - buy vol)
+      "total_buy_volume": float,      # cumulative USD value of buy fills
+      "total_sell_volume": float,     # cumulative USD value of sell fills
+      "avg_decision_latency_ms": float, # avg blocks(trigger→executed) × somnia_block_ms
+      "decision_latency_count": int,
     }
   }
 }
@@ -148,11 +164,11 @@ Key methods:
 
 ### Order Book (`market/order_book.py`)
 
-In-memory bid/ask book (`dict[order_id, BookEntry]`). `synthesize_order_book(mid_price)` in `MarketStateBus` regenerates 10 synthetic levels on each side every second to simulate realistic depth.
+In-memory bid/ask book (`dict[order_id, BookEntry]`). Rebuilt from real on-chain order data every 5s via `MarketStateBus.set_order_book(bids, asks)`.
 
 ### MarketStateBus (`market/state_bus.py`)
 
-The shared state layer — all agents read from here, Risk Manager writes warnings here.
+The shared state layer — the metrics loop writes real on-chain order book data here every 5s.
 
 | Method                                 | Description                                                                  |
 | -------------------------------------- | ---------------------------------------------------------------------------- |
@@ -205,10 +221,9 @@ ABI loading strategy: tries `contracts/deployments/somnia-testnet.json` first (d
 
 | `type`            | Frequency       | Fields                                                                                                                                                                                                                                                      |
 | ----------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `market_snapshot` | every 2s        | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10), `recent_trades` (last 50)                                                                                                                                                         |
+| `market_snapshot` | every 2s        | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10), `recent_trades` (last 50, each with `buyer_agent`/`seller_agent`)                                                                                                                 |
 | `candle`          | every 5s        | `time`, `open`, `high`, `low`, `close`, `volume`                                                                                                                                                                                                            |
-| `chain_metrics`   | every 5s        | `coordinator_balance`, `total_locked`, `spread_pct`, `buy_depth`, `sell_depth`, `loop_stopped_any`; `agents` map with per-agent `decisions_total`, `buy_count`, `sell_count`, `failures`, `treasury_balance`, `last_decision`, `last_price`, `loop_stopped` |
-| `risk_warning`    | on state change | `severity` (LOW/MEDIUM/HIGH), `warning_type`, `message`                                                                                                                                                                                                     |
+| `chain_metrics`   | every 5s        | Full `chain_metrics` object — see schema above                                                                                                                                                                                                              |
 | `event_injected`  | on button click | `event_type`, `description`, `price_before`, `price_after`, `timestamp`                                                                                                                                                                                     |
 
 ### Frontend → Backend
@@ -220,13 +235,15 @@ ABI loading strategy: tries `contracts/deployments/somnia-testnet.json` first (d
 
 ### HTTP Endpoints
 
-| Method | Path             | Description                                   |
-| ------ | ---------------- | --------------------------------------------- |
-| `GET`  | `/health`        | `{ status, agents_running, ws_connections }`  |
-| `GET`  | `/state`         | Full market snapshot from `MarketStateBus`    |
-| `GET`  | `/agents`        | Array of 4 agent state summaries from `chain_metrics` |
-| `GET`  | `/chain-metrics` | Latest `chain_metrics` snapshot (live coordinator/exchange/treasury state) |
-| `POST` | `/events/inject` | Body: `{ "event_type": "...", "params": {} }` |
+| Method | Path               | Description                                   |
+| ------ | ------------------ | --------------------------------------------- |
+| `GET`  | `/health`          | `{ status, agents_running, ws_connections }`  |
+| `GET`  | `/state`           | Full market snapshot from `MarketStateBus`    |
+| `GET`  | `/agents`          | Array of 4 agent state summaries from `chain_metrics` |
+| `GET`  | `/chain-metrics`   | Latest `chain_metrics` snapshot (live coordinator/exchange/treasury state) |
+| `POST` | `/events/inject`   | Body: `{ "event_type": "...", "params": {} }` |
+| `POST` | `/agents/trigger`  | Re-fires `triggerAgentDecision()` for all 4 agents; returns per-agent tx hashes or errors |
+| `GET`  | `/debug/config`    | Non-sensitive settings + `coordinator_initialized` flag — useful for diagnosing misconfigured `.env` |
 
 ---
 
