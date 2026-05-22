@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { AgentState, ChainMetrics } from '@/lib/types';
+import { AgentState, ChainMetrics, Fill } from '@/lib/types';
 
 const AGENT_DEFAULTS: { agent_id: AgentState['agent_id']; agent_name: string }[] = [
   { agent_id: 'market_maker',    agent_name: 'MM-Prime' },
@@ -25,6 +25,11 @@ function makeDefaultAgent(agent_id: AgentState['agent_id'], agent_name: string):
     loop_stopped: false,
     loop_stopped_reason: null,
     last_order_id: null,
+    trade_pnl: 0,
+    total_buy_volume: 0,
+    total_sell_volume: 0,
+    avg_decision_latency_ms: 0,
+    decision_latency_count: 0,
   };
 }
 
@@ -41,6 +46,8 @@ interface AgentStore {
   coordinatorBalance: number;
   totalLocked: number;
   loopStoppedAny: boolean;
+  recentFills: Fill[];
+  somniaBlockMs: number;
 
   updateFromChainMetrics: (metrics: ChainMetrics) => void;
 }
@@ -51,6 +58,8 @@ export const useAgentStore = create<AgentStore>((set) => ({
   coordinatorBalance: 0,
   totalLocked: 0,
   loopStoppedAny: false,
+  recentFills: [],
+  somniaBlockMs: 0,
 
   updateFromChainMetrics: (metrics) =>
     set((s) => {
@@ -76,6 +85,8 @@ export const useAgentStore = create<AgentStore>((set) => ({
         coordinatorBalance: metrics.coordinator_balance,
         totalLocked: metrics.total_locked,
         loopStoppedAny: metrics.loop_stopped_any,
+        recentFills: metrics.recent_fills ?? s.recentFills,
+        somniaBlockMs: metrics.somnia_block_ms ?? s.somniaBlockMs,
       };
     }),
 }));

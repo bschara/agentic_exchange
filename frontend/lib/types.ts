@@ -23,6 +23,16 @@ export interface Trade {
   amount: number;
   side: 'buy' | 'sell';
   timestamp: number;
+  buyer_agent?: string | null;
+  seller_agent?: string | null;
+}
+
+export interface Fill {
+  price: number;
+  amount: number;
+  buyer_agent: string;
+  seller_agent: string;
+  block: number;
 }
 
 export interface AgentState {
@@ -41,6 +51,11 @@ export interface AgentState {
   loop_stopped: boolean;
   loop_stopped_reason: string | null;
   last_order_id: number | null;
+  trade_pnl: number;
+  total_buy_volume: number;
+  total_sell_volume: number;
+  avg_decision_latency_ms: number;
+  decision_latency_count: number;
 }
 
 export interface ChainMetrics {
@@ -51,6 +66,8 @@ export interface ChainMetrics {
   sell_depth: number;
   loop_stopped_any: boolean;
   agents: Record<string, AgentState>;
+  recent_fills: Fill[];
+  somnia_block_ms: number;
   last_update: number;
 }
 

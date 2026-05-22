@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useMarketStore } from '@/store/marketStore';
+import { useAgentStore } from '@/store/agentStore';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { Badge } from '@/components/ui/badge';
 import { Zap, Activity } from 'lucide-react';
@@ -16,8 +17,19 @@ const EVENTS = [
 
 export function Header() {
   const { currentPrice, priceChange24h, volume24h, isConnected } = useMarketStore();
+  const { agents, somniaBlockMs } = useAgentStore();
   const { injectEvent } = useWebSocket();
   const [cooldowns, setCooldowns] = useState<Record<string, boolean>>({});
+
+  // Average latency across agents that have completed at least one decision cycle
+  const agentList = Object.values(agents);
+  const latencyAgents = agentList.filter((a) => a.decision_latency_count > 0);
+  const avgLatencyMs = latencyAgents.length
+    ? latencyAgents.reduce((s, a) => s + a.avg_decision_latency_ms, 0) / latencyAgents.length
+    : 0;
+  const ethEquivMs = somniaBlockMs > 0 && avgLatencyMs > 0
+    ? Math.round((avgLatencyMs / somniaBlockMs) * 12000)
+    : 0;
 
   const handleEvent = (type: string) => {
     if (cooldowns[type]) return;
@@ -60,6 +72,25 @@ export function Header() {
             <Activity className="w-3 h-3" />
             <span>Vol: ${(volume24h / 1000).toFixed(1)}K</span>
           </div>
+
+          {/* Latency ticker */}
+          {somniaBlockMs > 0 && avgLatencyMs > 0 ? (
+            <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+              <Zap className="w-3 h-3 text-emerald-400" />
+              <div className="text-xs font-mono">
+                <span className="text-emerald-400 font-bold">{avgLatencyMs.toFixed(0)}ms</span>
+                <span className="text-gray-600 mx-1">on Somnia</span>
+                <span className="text-gray-700">vs</span>
+                <span className="text-red-500/70 ml-1 font-bold">~{(ethEquivMs / 1000).toFixed(0)}s</span>
+                <span className="text-gray-700 ml-1">on ETH</span>
+              </div>
+            </div>
+          ) : somniaBlockMs === 0 && isConnected ? (
+            <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-violet-500/10 border border-violet-500/20">
+              <Zap className="w-3 h-3 text-violet-400" />
+              <span className="text-xs font-mono text-violet-400">local node</span>
+            </div>
+          ) : null}
         </div>
 
         {/* Event buttons */}

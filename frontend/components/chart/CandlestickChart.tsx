@@ -73,8 +73,14 @@ export function CandlestickChart() {
 
   useEffect(() => {
     if (!seriesRef.current || candles.length === 0) return;
-    const last = candles[candles.length - 1];
-    seriesRef.current.update({ ...last, time: last.time as Time });
+    try {
+      const last = candles[candles.length - 1];
+      seriesRef.current.update({ ...last, time: last.time as Time });
+    } catch {
+      seriesRef.current.setData(
+        [...candles].sort((a, b) => a.time - b.time).map((c) => ({ ...c, time: c.time as Time }))
+      );
+    }
   }, [candles]);
 
   return <div ref={containerRef} className="w-full h-full" />;

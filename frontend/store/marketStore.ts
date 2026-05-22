@@ -34,7 +34,7 @@ export const useMarketStore = create<MarketStore>((set) => ({
       const last = candles[candles.length - 1];
       if (last && last.time === candle.time) {
         candles[candles.length - 1] = candle;
-      } else {
+      } else if (!last || candle.time > last.time) {
         candles.push(candle);
         if (candles.length > 200) candles.shift();
       }

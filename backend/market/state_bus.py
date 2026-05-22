@@ -16,6 +16,8 @@ class RecentTrade:
     amount: float
     side: str
     timestamp: int
+    buyer_agent: Optional[str] = None
+    seller_agent: Optional[str] = None
 
 
 class MarketStateBus:
@@ -30,10 +32,16 @@ class MarketStateBus:
         self._volume_24h = 0.0
         self._price_open_24h = tracker.price
 
-    async def record_fill(self, price: float, volume: float) -> Optional[dict]:
+    async def record_fill(
+        self,
+        price: float,
+        volume: float,
+        buyer_agent: Optional[str] = None,
+        seller_agent: Optional[str] = None,
+    ) -> Optional[dict]:
         """
-        Called when a TradeExecuted event arrives (or a simulated fill in
-        simulation mode). Updates price, OHLCV, and recent-trades list.
+        Called when a TradeExecuted event arrives from the chain.
+        Updates price, OHLCV, and recent-trades list.
         Returns the completed bar dict if a 5s bar just closed.
         """
         async with self._lock:
@@ -45,6 +53,8 @@ class MarketStateBus:
                 amount=volume,
                 side="buy",
                 timestamp=int(time.time()),
+                buyer_agent=buyer_agent,
+                seller_agent=seller_agent,
             ))
             self._volume_24h += price * volume
             return completed_bar
@@ -67,7 +77,15 @@ class MarketStateBus:
                 "price_change_24h_pct": round(price_change, 4),
                 "order_book": depth,
                 "recent_trades": [
-                    {"id": t.id, "price": t.price, "amount": t.amount, "side": t.side, "timestamp": t.timestamp}
+                    {
+                        "id": t.id,
+                        "price": t.price,
+                        "amount": t.amount,
+                        "side": t.side,
+                        "timestamp": t.timestamp,
+                        "buyer_agent": t.buyer_agent,
+                        "seller_agent": t.seller_agent,
+                    }
                     for t in list(self._recent_trades)
                 ],
             }
@@ -128,13 +146,10 @@ class MarketStateBus:
             self._injected_events.clear()
             return events
 
-    def synthesize_order_book(self, mid_price: float):
-        """Generate synthetic bid/ask depth around real fill price for display."""
-        import random
+    def set_order_book(self, bids: list[dict], asks: list[dict]):
+        """Rebuild order book from real on-chain order data (price/amount dicts)."""
         self._order_book = OrderBook()
-        for i in range(1, 11):
-            bid_price = mid_price * (1 - 0.001 * i)
-            ask_price = mid_price * (1 + 0.001 * i)
-            size = 0.5 + random.random() * 3
-            self._order_book.add_order(-i, True, round(bid_price, 4), round(size, 4), "market")
-            self._order_book.add_order(-100 - i, False, round(ask_price, 4), round(size, 4), "market")
+        for i, b in enumerate(bids):
+            self._order_book.add_order(-(i + 1), True, b["price"], b["amount"], "limit")
+        for i, a in enumerate(asks):
+            self._order_book.add_order(-(100 + i + 1), False, a["price"], a["amount"], "limit")

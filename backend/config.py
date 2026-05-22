@@ -19,10 +19,12 @@ class Settings(BaseSettings):
     treasury_address: str = "0x0000000000000000000000000000000000000000"
     agent_coordinator_address: str = "0x0000000000000000000000000000000000000000"
 
-    # Market simulation (GBM for dashboard chart)
-    initial_price: float = 100.0
-    price_volatility: float = 0.025
-    price_drift: float = 0.0002
+    # Initial price shown before the first on-chain trade arrives
+    initial_price: float = 3500.0
+
+    # Somnia block time in milliseconds — used for latency display.
+    # Set to 400 for testnet, 0 for local Hardhat (blocks are instant).
+    somnia_block_ms: int = 0
 
     # CORS
     frontend_url: str = "http://localhost:3000"

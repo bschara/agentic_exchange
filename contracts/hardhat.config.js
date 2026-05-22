@@ -17,6 +17,10 @@ export default {
     },
   },
   networks: {
+    localhost: {
+      url: 'http://127.0.0.1:8545',
+      chainId: 31337,
+    },
     somnia: {
       url: process.env.SOMNIA_RPC_URL || 'https://dream-rpc.somnia.network',
       chainId: 50312,

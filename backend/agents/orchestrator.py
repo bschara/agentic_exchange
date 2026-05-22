@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 
 from eth_account import Account
@@ -30,13 +32,47 @@ AGENT_CONFIGS = [
 ]
 
 
+def _load_local_deployment():
+    """Override settings contract addresses and agent PKs from somnia-local.json if .env has placeholders."""
+    json_path = Path(__file__).parent.parent.parent / "contracts" / "deployments" / "somnia-local.json"
+    if not json_path.exists():
+        return
+    try:
+        dep = json.loads(json_path.read_text())
+        c = dep.get("contracts", {})
+        if c.get("Exchange", {}).get("address") and not _is_address(settings.exchange_address):
+            settings.exchange_address         = c["Exchange"]["address"]
+            settings.treasury_address         = c["Treasury"]["address"]
+            settings.agent_coordinator_address = c["AgentCoordinator"]["address"]
+            settings.agent_registry_address   = c.get("AgentRegistry", {}).get("address", settings.agent_registry_address)
+            logger.info(f"Loaded contract addresses from {json_path.name}")
+
+        # Load agent PKs if .env has placeholders (enables zero-config local dev)
+        agents_data = dep.get("agents", {})
+        pk_map = {
+            "market_maker":    "market_maker_pk",
+            "momentum_trader": "momentum_trader_pk",
+            "arbitrage_agent": "arbitrage_agent_pk",
+            "risk_manager":    "risk_manager_pk",
+        }
+        for agent_id, pk_key in pk_map.items():
+            pk = agents_data.get(agent_id, {}).get("pk", "")
+            current = getattr(settings, pk_key, "")
+            if pk and (not current or current == "0x0000000000000000000000000000000000000000000000000000000000000000"):
+                setattr(settings, pk_key, pk)
+                logger.info(f"Loaded {agent_id} PK from {json_path.name}")
+    except Exception as e:
+        logger.warning(f"Could not load somnia-local.json: {e}")
+
+
 class AgentOrchestrator:
     def __init__(self, hub: ConnectionManager):
         self._hub = hub
 
+        _load_local_deployment()
+
         self._price_tracker = ChainPriceTracker(initial_price=settings.initial_price)
         self._state_bus = MarketStateBus(self._price_tracker)
-        self._state_bus.synthesize_order_book(settings.initial_price)
 
         # Contracts — only instantiated when addresses are valid 20-byte hex strings
         self._exchange: Optional[ExchangeContract] = None
@@ -66,6 +102,13 @@ class AgentOrchestrator:
                 "wallet_address": wallet,
             }
 
+        # Address → agent_id mapping — built once, shared by both polling loops
+        self._wallet_to_id: dict[str, str] = {
+            a["wallet_address"].lower(): a["agent_id"] for a in self.agents.values()
+        }
+        # Tracks the block at which each agent's last DecisionTriggered event fired
+        self._decision_trigger_blocks: dict[str, int] = {}
+
         self._poll_task: Optional[asyncio.Task] = None
         self._snapshot_task: Optional[asyncio.Task] = None
         self._metrics_task: Optional[asyncio.Task] = None
@@ -79,23 +122,30 @@ class AgentOrchestrator:
             "buy_depth": 0,
             "sell_depth": 0,
             "loop_stopped_any": False,
+            "recent_fills": [],
+            "somnia_block_ms": settings.somnia_block_ms,
             "agents": {
                 cfg["id"]: {
-                    "agent_id":           cfg["id"],
-                    "agent_name":         cfg["name"],
-                    "decisions_total":    0,
-                    "buy_count":          0,
-                    "sell_count":         0,
-                    "hold_count":         0,
-                    "failures":           0,
-                    "orders_placed":      0,
-                    "treasury_balance":   0.0,
-                    "last_decision":      None,
-                    "last_price":         0.0,
-                    "last_order_id":      None,
-                    "last_fetched_price": 0.0,
-                    "loop_stopped":       False,
-                    "loop_stopped_reason": None,
+                    "agent_id":                 cfg["id"],
+                    "agent_name":               cfg["name"],
+                    "decisions_total":          0,
+                    "buy_count":                0,
+                    "sell_count":               0,
+                    "hold_count":               0,
+                    "failures":                 0,
+                    "orders_placed":            0,
+                    "treasury_balance":         0.0,
+                    "last_decision":            None,
+                    "last_price":               0.0,
+                    "last_order_id":            None,
+                    "last_fetched_price":       0.0,
+                    "loop_stopped":             False,
+                    "loop_stopped_reason":      None,
+                    "trade_pnl":                0.0,
+                    "total_buy_volume":         0.0,
+                    "total_sell_volume":        0.0,
+                    "avg_decision_latency_ms":  0.0,
+                    "decision_latency_count":   0,
                 }
                 for cfg in AGENT_CONFIGS
             },
@@ -172,16 +222,24 @@ class AgentOrchestrator:
             try:
                 if self._exchange:
                     events = await self._exchange.get_recent_trade_events(from_block)
+                    candle_updates: dict[int, dict] = {}
+
                     for event in events:
-                        completed_bar = await self._state_bus.record_fill(event["price"], event["amount"])
-                        self._state_bus.synthesize_order_book(event["price"])
-
+                        buyer_id  = self._wallet_to_id.get(event["buyer"].lower())
+                        seller_id = self._wallet_to_id.get(event["seller"].lower())
+                        completed_bar = await self._state_bus.record_fill(
+                            event["price"], event["amount"], buyer_id, seller_id
+                        )
+                        self._record_pnl_from_trade(event, buyer_id, seller_id)
                         if completed_bar:
-                            await self._hub.broadcast({"type": "candle", "data": completed_bar})
+                            candle_updates[completed_bar["time"]] = completed_bar
 
-                        current = self._price_tracker.get_current_bar()
-                        if current:
-                            await self._hub.broadcast({"type": "candle", "data": current})
+                    current = self._price_tracker.get_current_bar()
+                    if current:
+                        candle_updates[current["time"]] = current
+
+                    for bar in sorted(candle_updates.values(), key=lambda b: b["time"]):
+                        await self._hub.broadcast({"type": "candle", "data": bar})
 
                     if events:
                         from_block = max(e["block"] for e in events) + 1
@@ -190,6 +248,28 @@ class AgentOrchestrator:
                 logger.error(f"Trade event poll error: {e}")
 
             await asyncio.sleep(1.0)
+
+    def _record_pnl_from_trade(self, event: dict, buyer_id: Optional[str], seller_id: Optional[str]):
+        """Update per-agent P&L and recent_fills from a TradeExecuted event."""
+        trade_value = event["price"] * event["amount"]
+        metrics = self._chain_metrics
+
+        if buyer_id and buyer_id in metrics["agents"]:
+            metrics["agents"][buyer_id]["trade_pnl"]       -= trade_value
+            metrics["agents"][buyer_id]["total_buy_volume"] += trade_value
+
+        if seller_id and seller_id in metrics["agents"]:
+            metrics["agents"][seller_id]["trade_pnl"]        += trade_value
+            metrics["agents"][seller_id]["total_sell_volume"] += trade_value
+
+        metrics["recent_fills"].insert(0, {
+            "price":        round(event["price"], 4),
+            "amount":       round(event["amount"], 4),
+            "buyer_agent":  buyer_id or "external",
+            "seller_agent": seller_id or "external",
+            "block":        event["block"],
+        })
+        metrics["recent_fills"] = metrics["recent_fills"][:20]
 
     async def _snapshot_broadcast_loop(self):
         """Broadcasts market snapshot every 2s to keep the dashboard fresh between fills."""
@@ -217,11 +297,9 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning(f"Could not get start block for metrics: {e}")
 
-        wallet_to_id = {a["wallet_address"].lower(): a["agent_id"] for a in self.agents.values()}
-
         while True:
             try:
-                from_block = await self._collect_chain_metrics(from_block, wallet_to_id)
+                from_block = await self._collect_chain_metrics(from_block, self._wallet_to_id)
             except Exception as e:
                 logger.error(f"Contract metrics poll error: {e}")
             await asyncio.sleep(5.0)
@@ -240,7 +318,10 @@ class AgentOrchestrator:
                 max_block = max(max_block, ev["block"])
                 agent = metrics["agents"].get(ev.get("agentId"))
 
-                if ev["event"] == "DecisionExecuted" and agent:
+                if ev["event"] == "DecisionTriggered" and agent:
+                    self._decision_trigger_blocks[ev.get("agentId", "")] = ev["block"]
+
+                elif ev["event"] == "DecisionExecuted" and agent:
                     decision = ev.get("decision", "")
                     agent["decisions_total"] += 1
                     if decision == "BUY":
@@ -253,6 +334,19 @@ class AgentOrchestrator:
                     price_wei = ev.get("price", 0)
                     agent["last_price"] = float(Web3.from_wei(price_wei, "ether")) if price_wei else 0.0
                     agent["last_order_id"] = ev.get("orderId")
+
+                    # Latency: blocks from trigger to execution × ms per block
+                    agent_id_str = ev.get("agentId", "")
+                    trigger_block = self._decision_trigger_blocks.get(agent_id_str, 0)
+                    block_ms = metrics.get("somnia_block_ms", 0)
+                    if trigger_block and block_ms:
+                        delta_blocks = ev["block"] - trigger_block
+                        latency_ms   = delta_blocks * block_ms
+                        count        = agent["decision_latency_count"]
+                        agent["avg_decision_latency_ms"] = round(
+                            (agent["avg_decision_latency_ms"] * count + latency_ms) / (count + 1), 1
+                        )
+                        agent["decision_latency_count"] += 1
 
                 elif ev["event"] == "DecisionFailed" and agent:
                     agent["failures"] += 1
@@ -276,6 +370,9 @@ class AgentOrchestrator:
             depth = await self._exchange.get_order_book_depth()
             metrics["buy_depth"]  = depth["buy_count"]
             metrics["sell_depth"] = depth["sell_count"]
+
+            real_book = await self._exchange.get_order_book(10)
+            self._state_bus.set_order_book(real_book["bids"], real_book["asks"])
 
             for ev in await self._exchange.get_order_placed_events(from_block):
                 max_block = max(max_block, ev["block"])

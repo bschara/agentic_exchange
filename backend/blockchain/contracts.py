@@ -14,12 +14,15 @@ _ABIS: dict = {}
 
 def _load_abis():
     global _ABIS
-    deploy_path = Path(__file__).parent.parent.parent / "contracts" / "deployments" / "somnia-testnet.json"
-    if deploy_path.exists():
-        with open(deploy_path) as f:
-            data = json.load(f)
-        _ABIS = data.get("abis", {})
-        return
+    deployments = Path(__file__).parent.parent.parent / "contracts" / "deployments"
+    for candidate in ("somnia-testnet.json", "somnia-local.json"):
+        deploy_path = deployments / candidate
+        if deploy_path.exists():
+            with open(deploy_path) as f:
+                data = json.load(f)
+            _ABIS = data.get("abis", {})
+            logger.info(f"Loaded ABIs from {candidate}")
+            return
 
     # Minimal ABI fallback — updated for real LOB + AgentCoordinator
     _ABIS["Exchange"] = [
@@ -32,6 +35,7 @@ def _load_abis():
         {"inputs": [], "name": "getBestAsk", "outputs": [{"name": "price", "type": "uint256"}, {"name": "exists", "type": "bool"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getLastTradePrice", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "hasTraded", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "orderId", "type": "uint256"}], "name": "getOrder", "outputs": [{"components": [{"name": "id", "type": "uint256"}, {"name": "agent", "type": "address"}, {"name": "isBuy", "type": "bool"}, {"name": "price", "type": "uint256"}, {"name": "amount", "type": "uint256"}, {"name": "filled", "type": "uint256"}, {"name": "timestamp", "type": "uint256"}, {"name": "active", "type": "bool"}], "name": "", "type": "tuple"}], "stateMutability": "view", "type": "function"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "orderId", "type": "uint256"}, {"indexed": True, "name": "agent", "type": "address"}, {"indexed": False, "name": "isBuy", "type": "bool"}, {"indexed": False, "name": "price", "type": "uint256"}, {"indexed": False, "name": "amount", "type": "uint256"}], "name": "OrderPlaced", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "tradeId", "type": "uint256"}, {"indexed": False, "name": "buyOrderId", "type": "uint256"}, {"indexed": False, "name": "sellOrderId", "type": "uint256"}, {"indexed": True, "name": "buyer", "type": "address"}, {"indexed": True, "name": "seller", "type": "address"}, {"indexed": False, "name": "price", "type": "uint256"}, {"indexed": False, "name": "amount", "type": "uint256"}], "name": "TradeExecuted", "type": "event"},
     ]
@@ -81,7 +85,7 @@ class ExchangeContract:
         return {"tx_hash": tx_hash, "order_id": order_id}
 
     async def get_active_orders(self) -> list[int]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None, lambda: self._contract.functions.getActiveOrders().call()
         )
@@ -89,7 +93,7 @@ class ExchangeContract:
 
     async def get_best_bid(self) -> tuple[float, bool]:
         """Returns (price_float, exists). Price is 0.0 if no bids."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             price_wei, exists = await loop.run_in_executor(
                 None, lambda: self._contract.functions.getBestBid().call()
@@ -101,7 +105,7 @@ class ExchangeContract:
 
     async def get_best_ask(self) -> tuple[float, bool]:
         """Returns (price_float, exists). Price is 0.0 if no asks."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             price_wei, exists = await loop.run_in_executor(
                 None, lambda: self._contract.functions.getBestAsk().call()
@@ -113,7 +117,7 @@ class ExchangeContract:
 
     async def get_last_trade_price(self) -> float:
         """Returns last matched trade price as float, or 0.0 if no trades yet."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             price_wei = await loop.run_in_executor(
                 None, lambda: self._contract.functions.getLastTradePrice().call()
@@ -124,7 +128,7 @@ class ExchangeContract:
             return 0.0
 
     async def has_traded(self) -> bool:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(
                 None, lambda: self._contract.functions.hasTraded().call()
@@ -132,8 +136,45 @@ class ExchangeContract:
         except Exception:
             return False
 
+    async def get_order_book(self, n: int = 10) -> dict:
+        """Returns real on-chain order book: top N bid/ask price levels from active orders."""
+        loop = asyncio.get_running_loop()
+        try:
+            buy_ids, sell_ids = await asyncio.gather(
+                loop.run_in_executor(None, lambda: self._contract.functions.getActiveBuys().call()),
+                loop.run_in_executor(None, lambda: self._contract.functions.getActiveSells().call()),
+            )
+
+            async def fetch_order(oid):
+                return await loop.run_in_executor(
+                    None, lambda o=oid: self._contract.functions.getOrder(o).call()
+                )
+
+            buy_orders = await asyncio.gather(*[fetch_order(oid) for oid in buy_ids])
+            sell_orders = await asyncio.gather(*[fetch_order(oid) for oid in sell_ids])
+
+            def aggregate(raw_orders, is_buy: bool) -> list[dict]:
+                levels: dict[float, float] = {}
+                for o in raw_orders:
+                    # tuple: (id, agent, isBuy, price, amount, filled, timestamp, active)
+                    if not o[7]:  # active flag
+                        continue
+                    price = round(float(Web3.from_wei(o[3], "ether")), 4)
+                    remaining = float(Web3.from_wei(o[4] - o[5], "ether"))
+                    levels[price] = levels.get(price, 0.0) + remaining
+                sorted_prices = sorted(levels.keys(), reverse=is_buy)[:n]
+                return [{"price": p, "amount": round(levels[p], 4)} for p in sorted_prices]
+
+            return {
+                "bids": aggregate(buy_orders, True),
+                "asks": aggregate(sell_orders, False),
+            }
+        except Exception as e:
+            logger.debug(f"get_order_book failed: {e}")
+            return {"bids": [], "asks": []}
+
     async def get_order_book_depth(self) -> dict:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             buys, sells = await asyncio.gather(
                 loop.run_in_executor(None, lambda: self._contract.functions.getActiveBuys().call()),
@@ -145,7 +186,7 @@ class ExchangeContract:
             return {"buy_count": 0, "sell_count": 0}
 
     async def get_order_placed_events(self, from_block: int) -> list[dict]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             events = await loop.run_in_executor(
                 None,
@@ -169,8 +210,8 @@ class ExchangeContract:
             return []
 
     async def get_recent_trade_events(self, from_block: int, to_block: str = "latest") -> list[dict]:
-        """Poll TradeExecuted events for on-chain price history."""
-        loop = asyncio.get_event_loop()
+        """Poll TradeExecuted events — includes buyer/seller addresses and order IDs for P&L attribution."""
+        loop = asyncio.get_running_loop()
         try:
             events = await loop.run_in_executor(
                 None,
@@ -180,10 +221,15 @@ class ExchangeContract:
             )
             return [
                 {
-                    "price": float(Web3.from_wei(e["args"]["price"], "ether")),
-                    "amount": float(Web3.from_wei(e["args"]["amount"], "ether")),
-                    "block": e["blockNumber"],
-                    "tx_hash": e["transactionHash"].hex(),
+                    "trade_id":      int(e["args"]["tradeId"]),
+                    "buy_order_id":  int(e["args"]["buyOrderId"]),
+                    "sell_order_id": int(e["args"]["sellOrderId"]),
+                    "buyer":         e["args"]["buyer"],
+                    "seller":        e["args"]["seller"],
+                    "price":         float(Web3.from_wei(e["args"]["price"], "ether")),
+                    "amount":        float(Web3.from_wei(e["args"]["amount"], "ether")),
+                    "block":         e["blockNumber"],
+                    "tx_hash":       e["transactionHash"].hex(),
                 }
                 for e in events
             ]
@@ -204,7 +250,7 @@ class TreasuryContract:
 
     async def get_balance(self, agent_address: str) -> float:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             balance_wei = await loop.run_in_executor(
                 None,
                 lambda: self._contract.functions.getBalance(
@@ -217,7 +263,7 @@ class TreasuryContract:
             return 0.0
 
     async def get_total_locked(self) -> float:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             balance_wei = await loop.run_in_executor(
                 None, lambda: self._contract.functions.totalLocked().call()
@@ -259,7 +305,7 @@ class AgentCoordinatorContract:
         return {"tx_hash": tx_hash, "agent_id": agent_id}
 
     async def get_balance(self) -> float:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             balance_wei = await loop.run_in_executor(
                 None, lambda: self._contract.functions.getBalance().call()
@@ -271,14 +317,15 @@ class AgentCoordinatorContract:
 
     async def get_coordinator_events(self, from_block: int) -> list[dict]:
         """Poll all coordinator events in one pass. Returns events sorted by block."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         results = []
 
         event_types = [
-            ("DecisionExecuted", self._contract.events.DecisionExecuted),
-            ("DecisionFailed",   self._contract.events.DecisionFailed),
-            ("LoopStopped",      self._contract.events.LoopStopped),
-            ("LLMRequestFired",  self._contract.events.LLMRequestFired),
+            ("DecisionTriggered", self._contract.events.DecisionTriggered),
+            ("DecisionExecuted",  self._contract.events.DecisionExecuted),
+            ("DecisionFailed",    self._contract.events.DecisionFailed),
+            ("LoopStopped",       self._contract.events.LoopStopped),
+            ("LLMRequestFired",   self._contract.events.LLMRequestFired),
         ]
 
         for name, event_cls in event_types:
