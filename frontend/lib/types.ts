@@ -23,23 +23,52 @@ export interface Trade {
   amount: number;
   side: 'buy' | 'sell';
   timestamp: number;
+  buyer_agent?: string | null;
+  seller_agent?: string | null;
+}
+
+export interface Fill {
+  price: number;
+  amount: number;
+  buyer_agent: string;
+  seller_agent: string;
+  block: number;
 }
 
 export interface AgentState {
   agent_id: 'market_maker' | 'momentum_trader' | 'arbitrage_agent' | 'risk_manager';
   agent_name: string;
-  status: 'THINKING' | 'EXECUTING' | 'IDLE';
-  balance_eth: number;
-  position: number;
-  position_side: 'LONG' | 'SHORT' | 'FLAT';
-  pnl_session: number;
-  active_orders: number;
-  last_action: string;
-  last_tx_hash: string | null;
-  reasoning: string;
-  reasoning_summary: string;
-  loop_count: number;
-  timestamp: number;
+  decisions_total: number;
+  buy_count: number;
+  sell_count: number;
+  hold_count: number;
+  failures: number;
+  orders_placed: number;
+  treasury_balance: number;
+  last_decision: 'BUY' | 'SELL' | 'HOLD' | null;
+  last_price: number;
+  last_fetched_price: number;
+  loop_stopped: boolean;
+  loop_stopped_reason: string | null;
+  last_order_id: number | null;
+  trade_pnl: number;
+  total_buy_volume: number;
+  total_sell_volume: number;
+  avg_decision_latency_ms: number;
+  decision_latency_count: number;
+}
+
+export interface ChainMetrics {
+  coordinator_balance: number;
+  total_locked: number;
+  spread_pct: number;
+  buy_depth: number;
+  sell_depth: number;
+  loop_stopped_any: boolean;
+  agents: Record<string, AgentState>;
+  recent_fills: Fill[];
+  somnia_block_ms: number;
+  last_update: number;
 }
 
 export interface MarketSnapshot {
@@ -70,13 +99,6 @@ export interface RiskWarning {
   timestamp: number;
 }
 
-export interface OnchainEvent {
-  event: string;
-  tx_hash: string;
-  block_number: number;
-  args: Record<string, unknown>;
-}
-
 export interface EventInjected {
   event_type: string;
   description: string;
@@ -85,12 +107,12 @@ export interface EventInjected {
   timestamp: number;
 }
 
+export type AgentStatus = 'ACTIVE' | 'WAITING' | 'STOPPED';
+
 export type WSMessage =
   | { type: 'market_snapshot'; data: MarketSnapshot; timestamp: number }
   | { type: 'candle'; data: CandleData }
-  | { type: 'agent_update'; data: AgentState }
+  | { type: 'chain_metrics'; data: ChainMetrics; timestamp: number }
   | { type: 'risk_warning'; data: RiskWarning }
-  | { type: 'onchain_event'; data: OnchainEvent }
   | { type: 'event_injected'; data: EventInjected }
-  | { type: 'activity_feed'; data: ActivityFeedItem }
   | { type: 'pong' };

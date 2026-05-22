@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { CandleData, OrderBook, Trade, MarketSnapshot } from '@/lib/types';
-import { FAKE_CANDLES, FAKE_ORDER_BOOK, FAKE_TRADES } from '@/lib/fake-data';
 
 interface MarketStore {
   candles: CandleData[];
@@ -19,16 +18,14 @@ interface MarketStore {
   setConnected: (v: boolean) => void;
 }
 
-const initPrice = FAKE_CANDLES[FAKE_CANDLES.length - 1].close;
-
 export const useMarketStore = create<MarketStore>((set) => ({
-  candles: FAKE_CANDLES,
-  orderBook: FAKE_ORDER_BOOK,
-  recentTrades: FAKE_TRADES,
-  currentPrice: initPrice,
-  priceChange24h: 2.34,
-  volume24h: 48230,
-  spreadPct: 0.28,
+  candles: [],
+  orderBook: { bids: [], asks: [] },
+  recentTrades: [],
+  currentPrice: 0,
+  priceChange24h: 0,
+  volume24h: 0,
+  spreadPct: 0,
   isConnected: false,
 
   addCandle: (candle) =>
@@ -37,7 +34,7 @@ export const useMarketStore = create<MarketStore>((set) => ({
       const last = candles[candles.length - 1];
       if (last && last.time === candle.time) {
         candles[candles.length - 1] = candle;
-      } else {
+      } else if (!last || candle.time > last.time) {
         candles.push(candle);
         if (candles.length > 200) candles.shift();
       }
@@ -47,10 +44,7 @@ export const useMarketStore = create<MarketStore>((set) => ({
   setOrderBook: (orderBook) => set({ orderBook }),
 
   addTrade: (trade) =>
-    set((s) => {
-      const trades = [trade, ...s.recentTrades].slice(0, 50);
-      return { recentTrades: trades };
-    }),
+    set((s) => ({ recentTrades: [trade, ...s.recentTrades].slice(0, 50) })),
 
   setMarketSnapshot: (snap) =>
     set({

@@ -1,11 +1,11 @@
 import asyncio
 import logging
-import os
 from typing import Optional
 
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from eth_account import Account
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +38,6 @@ async def send_transaction(
     value: int = 0,
     rpc_url: str = "https://dream-rpc.somnia.network",
 ) -> str:
-    from config import settings
-
-    if settings.simulation_mode:
-        import random
-        fake_hash = "0x" + "".join(random.choices("0123456789abcdef", k=64))
-        logger.info(f"[SIMULATION] Fake tx: {fake_hash}")
-        await asyncio.sleep(0.5)
-        return fake_hash
-
     w3 = get_web3(rpc_url)
     account = Account.from_key(private_key)
     address = account.address
@@ -65,7 +56,7 @@ async def send_transaction(
                 "gas": 500_000,
                 "gasPrice": GAS_PRICE,
                 "nonce": _nonces[address],
-                "chainId": 50312,
+                "chainId": settings.somnia_chain_id,
             }
 
             signed = w3.eth.account.sign_transaction(tx, private_key)
@@ -73,7 +64,7 @@ async def send_transaction(
             _nonces[address] += 1
 
             # Wait for receipt with 30s timeout
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             receipt = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
@@ -103,7 +94,7 @@ def load_contract(w3: Web3, address: str, abi: list):
 
 async def get_eth_balance(address: str, rpc_url: str = "https://dream-rpc.somnia.network") -> float:
     w3 = get_web3(rpc_url)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     balance_wei = await loop.run_in_executor(
         None, lambda: w3.eth.get_balance(Web3.to_checksum_address(address))
     )

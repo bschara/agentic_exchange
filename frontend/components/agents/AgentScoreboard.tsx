@@ -1,0 +1,98 @@
+'use client';
+
+import { useAgentStore } from '@/store/agentStore';
+import { AgentState } from '@/lib/types';
+
+const AGENT_ICONS: Record<string, string> = {
+  market_maker:    '⚖️',
+  momentum_trader: '📈',
+  arbitrage_agent: '🔍',
+  risk_manager:    '🛡️',
+};
+
+const MEDALS = ['🥇', '🥈', '🥉', '4️⃣'];
+
+function pnlColor(pnl: number): string {
+  if (pnl > 0) return 'text-emerald-400';
+  if (pnl < 0) return 'text-red-400';
+  return 'text-gray-500';
+}
+
+function pnlBg(pnl: number): string {
+  if (pnl > 0.5) return 'border-emerald-500/20 bg-emerald-500/5';
+  if (pnl < -0.5) return 'border-red-500/20 bg-red-500/5';
+  return 'border-white/5';
+}
+
+function fmt(n: number): string {
+  const abs = Math.abs(n);
+  const sign = n >= 0 ? '+' : '-';
+  if (abs >= 1000) return `${sign}$${(abs / 1000).toFixed(1)}K`;
+  return `${sign}$${abs.toFixed(2)}`;
+}
+
+export function AgentScoreboard() {
+  const agents = useAgentStore((s) => s.agents);
+
+  const ranked: AgentState[] = Object.values(agents).sort(
+    (a, b) => (b.trade_pnl ?? 0) - (a.trade_pnl ?? 0)
+  );
+
+  const hasData = ranked.some((a) => a.decisions_total > 0);
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between px-1 mb-1">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-widest">
+          Agent War — P&amp;L Scoreboard
+        </span>
+        {!hasData && (
+          <span className="text-xs text-gray-700 italic">waiting for first trades…</span>
+        )}
+      </div>
+
+      {ranked.map((agent, idx) => {
+        const pnl = agent.trade_pnl ?? 0;
+        const buyVol  = agent.total_buy_volume ?? 0;
+        const sellVol = agent.total_sell_volume ?? 0;
+        const latency = agent.avg_decision_latency_ms ?? 0;
+        const hasTrades = buyVol + sellVol > 0;
+
+        return (
+          <div
+            key={agent.agent_id}
+            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all duration-300 ${pnlBg(pnl)}`}
+          >
+            {/* Rank */}
+            <span className="text-base w-5 text-center flex-none">{MEDALS[idx]}</span>
+
+            {/* Agent identity */}
+            <span className="text-base flex-none">{AGENT_ICONS[agent.agent_id]}</span>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold text-white truncate">{agent.agent_name}</div>
+              {hasTrades ? (
+                <div className="text-[10px] text-gray-600 font-mono">
+                  ↑${sellVol.toFixed(0)} ↓${buyVol.toFixed(0)}
+                </div>
+              ) : (
+                <div className="text-[10px] text-gray-700">no fills yet</div>
+              )}
+            </div>
+
+            {/* P&L */}
+            <div className="text-right flex-none">
+              <div className={`text-sm font-mono font-bold ${pnlColor(pnl)}`}>
+                {fmt(pnl)}
+              </div>
+              {latency > 0 && (
+                <div className="text-[10px] text-gray-600 font-mono">
+                  ~{latency.toFixed(0)}ms
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}

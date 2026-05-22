@@ -15,26 +15,26 @@ frontend/
 │   └── globals.css          # CSS variables, Tailwind directives, fadeIn animation
 ├── components/
 │   ├── layout/
-│   │   ├── Header.tsx       # Logo, live ticker, 5 event injection buttons
+│   │   ├── Header.tsx       # Logo, live ticker (price + volume + spread), 5 event injection buttons
 │   │   └── ActivityFeed.tsx # Horizontal scrolling feed bar (color-coded by category)
 │   ├── chart/
 │   │   ├── CandlestickChart.tsx  # TradingView Lightweight Charts v5 (SSR-disabled)
 │   │   ├── OrderBook.tsx         # Bid/ask depth with proportional size bars
-│   │   └── RecentTrades.tsx      # Scrollable recent trades list
+│   │   └── RecentTrades.tsx      # Scrollable recent trades list with buyer/seller agent attribution
 │   └── agents/
 │       ├── AgentGrid.tsx         # 2-column grid container for 4 agent cards
-│       ├── AgentCard.tsx         # Stats + reasoning + tx hash per agent
-│       ├── ReasoningPanel.tsx    # Reasoning history (4 entries, fadeIn on newest)
+│       ├── AgentCard.tsx         # Stats + decision history + tx hash per agent
+│       ├── AgentScoreboard.tsx   # P&L leaderboard ranked by trade_pnl, shows volume + latency
+│       ├── ReasoningPanel.tsx    # Decision history (last 20 entries, fadeIn on newest)
 │       └── AgentStatusBadge.tsx  # THINKING / EXECUTING / IDLE badge with animations
 ├── store/
 │   ├── marketStore.ts       # Zustand: candles, orderBook, trades, price, connection
-│   ├── agentStore.ts        # Zustand: agent states, reasoning history
+│   ├── agentStore.ts        # Zustand: agent states, decision history, coordinator metrics
 │   └── feedStore.ts         # Zustand: activity feed items
 ├── hooks/
 │   └── useWebSocket.ts      # WS connect/reconnect, message dispatch, injectEvent()
 ├── lib/
-│   ├── types.ts             # All TypeScript interfaces (CandleData, AgentState, etc.)
-│   ├── fake-data.ts         # GBM seed data: candles, orderbook, agents, feed items
+│   ├── types.ts             # All TypeScript interfaces (CandleData, AgentState, ChainMetrics, etc.)
 │   └── utils.ts             # cn() helper for className merging
 └── components/ui/
     ├── badge.tsx            # Simple Badge component (default/outline variants)
@@ -51,7 +51,7 @@ npm run dev
 # Dashboard at http://localhost:3000
 ```
 
-The dashboard renders immediately from fake seed data. Connect to the backend to see live agent updates.
+The dashboard renders with zeroed-out defaults until the WebSocket connects and the first `chain_metrics` message arrives (within ~5s of backend startup).
 
 ### Environment Variables (`.env.local`)
 
@@ -84,12 +84,17 @@ Key actions: `addCandle(candle)` (appends or updates last bar, caps at 200), `se
 
 ### `store/agentStore.ts`
 
-| State field        | Type                           | Description                       |
-| ------------------ | ------------------------------ | --------------------------------- |
-| `agents`           | `Record<agent_id, AgentState>` | Latest state for each of 4 agents |
-| `reasoningHistory` | `Record<agent_id, string[]>`   | Last 20 reasoning texts per agent |
+| State field          | Type                           | Description                                              |
+| -------------------- | ------------------------------ | -------------------------------------------------------- |
+| `agents`             | `Record<agent_id, AgentState>` | Full agent state from latest `chain_metrics`             |
+| `decisionHistory`    | `Record<agent_id, string[]>`   | Last 20 `"BUY @ $3245"` entries, derived from diffs      |
+| `coordinatorBalance` | `number`                       | STT remaining in coordinator                             |
+| `totalLocked`        | `number`                       | Total STT in treasury                                    |
+| `loopStoppedAny`     | `boolean`                      | True if any agent's loop has stopped                     |
+| `recentFills`        | `Fill[]`                       | Last 20 matched trades with buyer/seller agent IDs       |
+| `somniaBlockMs`      | `number`                       | Block time in ms (for latency display)                   |
 
-`updateAgent(state)` updates by `agent_id`. `appendReasoning(id, text)` prepends and caps at 20.
+`updateFromChainMetrics(metrics)` is the single update entry point — called on every `chain_metrics` WS message.
 
 ### `store/feedStore.ts`
 
@@ -103,15 +108,13 @@ Key actions: `addCandle(candle)` (appends or updates last bar, caps at 200), `se
 
 Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. Sends keepalive ping every 30s.
 
-| `msg.type`        | Action                                                                           |
-| ----------------- | -------------------------------------------------------------------------------- |
-| `market_snapshot` | `marketStore.setMarketSnapshot(msg.data)`                                        |
-| `candle`          | `marketStore.addCandle(msg.data)`                                                |
-| `agent_update`    | `agentStore.updateAgent(msg.data)` + `agentStore.appendReasoning(id, reasoning)` |
-| `activity_feed`   | `feedStore.addItem(msg.data)`                                                    |
-| `risk_warning`    | `feedStore.addItem(...)` formatted as `category: "warning"`                      |
-| `event_injected`  | `feedStore.addItem(...)` formatted as `category: "event"`                        |
-| `pong`            | no-op                                                                            |
+| `msg.type`        | Action                                                                                                                         |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `market_snapshot` | `marketStore.setMarketSnapshot(msg.data)`                                                                                      |
+| `candle`          | `marketStore.addCandle(msg.data)`                                                                                              |
+| `chain_metrics`   | `agentStore.updateFromChainMetrics(msg.data)` — also diffs per-agent `decisions_total` to push new decision entries to `feedStore` and `loop_stopped` transitions as warnings |
+| `risk_warning`    | `feedStore.addItem(...)` as `category: "warning"` — kept for forward-compat; not currently sent by backend                    |
+| `event_injected`  | `feedStore.addItem(...)` as `category: "event"`                                                                                |
 
 **Sending events:** `useWebSocket` exports `injectEvent(type)` which POSTs to `POST /events/inject`. Called by the Header buttons.
 
@@ -143,7 +146,7 @@ Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. S
 ### `RecentTrades.tsx`
 
 - Reads: `marketStore.recentTrades`
-- Shows first 30 trades: price (colored by side), size, age
+- Shows first 30 trades: price (colored by side), size, age, and buyer/seller agent names when available
 - Time-ago: "5s", "2m", "1h"
 
 ### `AgentGrid.tsx`
@@ -155,9 +158,16 @@ Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. S
 
 - Props: `agent: AgentState`
 - Per-agent color coding: market_maker=blue, momentum_trader=emerald, arbitrage_agent=violet, risk_manager=yellow
-- Stats: balance (STT), position (with directional icon), session PnL (colored)
-- Tx hash: truncated `0xabcd...1234`, links to `${NEXT_PUBLIC_SOMNIA_EXPLORER}/tx/${hash}`
+- Stats: decisions total, BUY/SELL/HOLD counts, treasury balance, last decision + price
 - Contains `ReasoningPanel` and `AgentStatusBadge`
+
+### `AgentScoreboard.tsx`
+
+- Reads: `agentStore.agents`
+- Ranks all 4 agents by `trade_pnl` (highest first) with medal emojis
+- Shows per-agent: P&L (colored green/red), buy volume, sell volume, avg decision latency (`avg_decision_latency_ms`) if non-zero
+- Row background tints green (profitable) or red (losing) based on P&L threshold
+- Shows "waiting for first trades…" until any agent has fills
 
 ### `AgentStatusBadge.tsx`
 
@@ -184,17 +194,6 @@ Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. S
 
 ---
 
-## Fake Seed Data (`lib/fake-data.ts`)
-
-Generated once at module load — seeds stores so the dashboard is visually complete before the WebSocket connects:
-
-- **`FAKE_CANDLES`**: 120 GBM candles starting at $100, σ=0.015, 5s bars
-- **`FAKE_ORDER_BOOK`**: 10 bid/ask levels around the last fake candle close
-- **`FAKE_TRADES`**: 20 trades with randomized side, price, and size
-- **`FAKE_AGENTS`**: 4 `AgentState` objects with realistic reasoning text and varying positions
-- **`FAKE_FEED_ITEMS`**: 5 sample activity items across different categories
-
----
 
 ## TradingView v5 Notes
 
@@ -209,12 +208,12 @@ This project uses `lightweight-charts@5.x`. The v5 API broke compatibility with 
 
 ## Adding a New Agent
 
-1. **`lib/fake-data.ts`**: Add entry to `FAKE_AGENTS` with a new `agent_id`
-2. **`store/agentStore.ts`**: No change needed — store is keyed by `agent_id` dynamically
-3. **`components/agents/AgentGrid.tsx`**: Add new `agent_id` to the ordered array
-4. **`components/agents/AgentCard.tsx`**: Add emoji to the icon map and color to the color map
+1. **`store/agentStore.ts`**: Add entry to `AGENT_DEFAULTS`
+2. **`components/agents/AgentGrid.tsx`**: Add new `agent_id` to the ordered array
+3. **`components/agents/AgentCard.tsx`**: Add emoji to the icon map and color to the color map
+4. **`components/agents/AgentScoreboard.tsx`**: Add emoji to `AGENT_ICONS`
 5. **`lib/types.ts`**: Add new id to the `AgentState["agent_id"]` union type
-6. Backend: add to `AGENT_CONFIGS` + `SYSTEM_PROMPTS` + config + .env
+6. Backend: add to `AGENT_CONFIGS` in `orchestrator.py` + `config.py` + `.env` + `deploy.js` (`setSystemPrompt`)
 
 ---
 

@@ -6,8 +6,9 @@ contract Exchange {
         uint256 id;
         address agent;
         bool isBuy;
-        uint256 price;
-        uint256 amount;
+        uint256 price;   // scaled by 1e18
+        uint256 amount;  // original amount, scaled by 1e18
+        uint256 filled;  // amount matched so far, scaled by 1e18
         uint256 timestamp;
         bool active;
     }
@@ -26,33 +27,32 @@ contract Exchange {
     uint256 private _nextOrderId = 1;
     uint256 private _nextTradeId = 1;
 
+    // Last matched trade price — read by Python backend for real price discovery
+    uint256 public lastTradePrice;
+    bool public hasTraded;
+
     mapping(uint256 => Order) public orders;
     mapping(uint256 => Trade) public trades;
-    uint256[] private _activeOrderIds;
 
-    event OrderPlaced(
-        uint256 indexed orderId,
-        address indexed agent,
-        bool isBuy,
-        uint256 price,
-        uint256 amount
-    );
+    uint256[] private _activeBuyIds;
+    uint256[] private _activeSellIds;
+
+    event OrderPlaced(uint256 indexed orderId, address indexed agent, bool isBuy, uint256 price, uint256 amount);
     event OrderCancelled(uint256 indexed orderId, address indexed agent);
+    event OrderFilled(uint256 indexed orderId, uint256 filledAmount, bool fullFill);
     event TradeExecuted(
         uint256 indexed tradeId,
         uint256 buyOrderId,
         uint256 sellOrderId,
-        address buyer,
-        address seller,
+        address indexed buyer,
+        address indexed seller,
         uint256 price,
         uint256 amount
     );
 
-    function placeOrder(
-        bool isBuy,
-        uint256 price,
-        uint256 amount
-    ) external returns (uint256 orderId) {
+    // ── Placing orders ──────────────────────────────────────────────────────────
+
+    function placeOrder(bool isBuy, uint256 price, uint256 amount) external returns (uint256 orderId) {
         require(price > 0, "Price must be > 0");
         require(amount > 0, "Amount must be > 0");
 
@@ -63,13 +63,85 @@ contract Exchange {
             isBuy: isBuy,
             price: price,
             amount: amount,
+            filled: 0,
             timestamp: block.timestamp,
             active: true
         });
-        _activeOrderIds.push(orderId);
 
         emit OrderPlaced(orderId, msg.sender, isBuy, price, amount);
+
+        uint256 remaining = _matchOrder(orderId, isBuy, price, amount);
+
+        if (remaining == 0) {
+            orders[orderId].active = false;
+        } else {
+            if (isBuy) {
+                _activeBuyIds.push(orderId);
+            } else {
+                _activeSellIds.push(orderId);
+            }
+        }
     }
+
+    // ── Matching engine ─────────────────────────────────────────────────────────
+
+    function _matchOrder(
+        uint256 newId,
+        bool isBuy,
+        uint256 price,
+        uint256 originalAmount
+    ) internal returns (uint256 remaining) {
+        remaining = originalAmount;
+
+        uint256[] storage book = isBuy ? _activeSellIds : _activeBuyIds;
+        uint256 i = 0;
+
+        while (i < book.length && remaining > 0) {
+            uint256 oppositeId = book[i];
+            Order storage opp = orders[oppositeId];
+
+            if (!opp.active) {
+                _removeAt(book, i);
+                continue;
+            }
+
+            // Buy: match sells where sell.price <= buy.price
+            // Sell: match buys where buy.price >= sell.price
+            bool priceMatch = isBuy ? (price >= opp.price) : (opp.price >= price);
+
+            if (priceMatch) {
+                uint256 oppRemaining = opp.amount - opp.filled;
+                uint256 fill = remaining < oppRemaining ? remaining : oppRemaining;
+                uint256 fillPrice = opp.price; // maker's price
+
+                orders[newId].filled += fill;
+                opp.filled += fill;
+                remaining -= fill;
+
+                // Record trade — delegated to helper to avoid stack-too-deep
+                _recordTrade(isBuy, newId, oppositeId, fillPrice, fill);
+
+                if (opp.filled >= opp.amount) {
+                    opp.active = false;
+                    emit OrderFilled(oppositeId, opp.filled, true);
+                    _removeAt(book, i);
+                    // don't increment i — slot now holds the swapped element
+                } else {
+                    i++;
+                }
+            } else {
+                i++;
+            }
+        }
+
+        if (orders[newId].filled > 0 && orders[newId].filled < originalAmount) {
+            emit OrderFilled(newId, orders[newId].filled, false);
+        } else if (orders[newId].filled >= originalAmount) {
+            emit OrderFilled(newId, orders[newId].filled, true);
+        }
+    }
+
+    // ── Cancellation ────────────────────────────────────────────────────────────
 
     function cancelOrder(uint256 orderId) external {
         Order storage order = orders[orderId];
@@ -77,55 +149,38 @@ contract Exchange {
         require(order.agent == msg.sender, "Not your order");
 
         order.active = false;
-        _removeFromActive(orderId);
-
+        if (order.isBuy) {
+            _removeFromBook(_activeBuyIds, orderId);
+        } else {
+            _removeFromBook(_activeSellIds, orderId);
+        }
         emit OrderCancelled(orderId, msg.sender);
     }
 
-    function executeTrade(
-        uint256 buyOrderId,
-        uint256 sellOrderId
-    ) external returns (uint256 tradeId) {
-        Order storage buyOrder = orders[buyOrderId];
-        Order storage sellOrder = orders[sellOrderId];
+    // ── Views ────────────────────────────────────────────────────────────────────
 
-        require(buyOrder.active, "Buy order not active");
-        require(sellOrder.active, "Sell order not active");
-        require(buyOrder.isBuy, "Not a buy order");
-        require(!sellOrder.isBuy, "Not a sell order");
-        require(buyOrder.price >= sellOrder.price, "Price mismatch");
+    function getBestBid() external view returns (uint256 price, bool exists) {
+        for (uint256 i = 0; i < _activeBuyIds.length; i++) {
+            Order storage o = orders[_activeBuyIds[i]];
+            if (o.active && (!exists || o.price > price)) {
+                price = o.price;
+                exists = true;
+            }
+        }
+    }
 
-        uint256 executedAmount = buyOrder.amount < sellOrder.amount
-            ? buyOrder.amount
-            : sellOrder.amount;
-        uint256 executedPrice = sellOrder.price;
+    function getBestAsk() external view returns (uint256 price, bool exists) {
+        for (uint256 i = 0; i < _activeSellIds.length; i++) {
+            Order storage o = orders[_activeSellIds[i]];
+            if (o.active && (!exists || o.price < price)) {
+                price = o.price;
+                exists = true;
+            }
+        }
+    }
 
-        buyOrder.active = false;
-        sellOrder.active = false;
-        _removeFromActive(buyOrderId);
-        _removeFromActive(sellOrderId);
-
-        tradeId = _nextTradeId++;
-        trades[tradeId] = Trade({
-            id: tradeId,
-            buyOrderId: buyOrderId,
-            sellOrderId: sellOrderId,
-            buyer: buyOrder.agent,
-            seller: sellOrder.agent,
-            price: executedPrice,
-            amount: executedAmount,
-            timestamp: block.timestamp
-        });
-
-        emit TradeExecuted(
-            tradeId,
-            buyOrderId,
-            sellOrderId,
-            buyOrder.agent,
-            sellOrder.agent,
-            executedPrice,
-            executedAmount
-        );
+    function getLastTradePrice() external view returns (uint256) {
+        return lastTradePrice;
     }
 
     function getOrder(uint256 orderId) external view returns (Order memory) {
@@ -137,15 +192,61 @@ contract Exchange {
     }
 
     function getActiveOrders() external view returns (uint256[] memory) {
-        return _activeOrderIds;
+        uint256 totalLen = _activeBuyIds.length + _activeSellIds.length;
+        uint256[] memory result = new uint256[](totalLen);
+        for (uint256 i = 0; i < _activeBuyIds.length; i++) result[i] = _activeBuyIds[i];
+        for (uint256 i = 0; i < _activeSellIds.length; i++) result[_activeBuyIds.length + i] = _activeSellIds[i];
+        return result;
     }
 
-    function _removeFromActive(uint256 orderId) internal {
-        uint256 len = _activeOrderIds.length;
-        for (uint256 i = 0; i < len; i++) {
-            if (_activeOrderIds[i] == orderId) {
-                _activeOrderIds[i] = _activeOrderIds[len - 1];
-                _activeOrderIds.pop();
+    function getActiveBuys() external view returns (uint256[] memory) {
+        return _activeBuyIds;
+    }
+
+    function getActiveSells() external view returns (uint256[] memory) {
+        return _activeSellIds;
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────────
+
+    function _recordTrade(
+        bool isBuy,
+        uint256 newId,
+        uint256 oppositeId,
+        uint256 fillPrice,
+        uint256 fill
+    ) internal {
+        uint256 tradeId = _nextTradeId++;
+        uint256 buyId = isBuy ? newId : oppositeId;
+        uint256 sellId = isBuy ? oppositeId : newId;
+        address buyer = orders[buyId].agent;
+        address seller = orders[sellId].agent;
+
+        trades[tradeId] = Trade({
+            id: tradeId,
+            buyOrderId: buyId,
+            sellOrderId: sellId,
+            buyer: buyer,
+            seller: seller,
+            price: fillPrice,
+            amount: fill,
+            timestamp: block.timestamp
+        });
+        lastTradePrice = fillPrice;
+        hasTraded = true;
+
+        emit TradeExecuted(tradeId, buyId, sellId, buyer, seller, fillPrice, fill);
+    }
+
+    function _removeAt(uint256[] storage arr, uint256 index) internal {
+        arr[index] = arr[arr.length - 1];
+        arr.pop();
+    }
+
+    function _removeFromBook(uint256[] storage arr, uint256 orderId) internal {
+        for (uint256 i = 0; i < arr.length; i++) {
+            if (arr[i] == orderId) {
+                _removeAt(arr, i);
                 break;
             }
         }
