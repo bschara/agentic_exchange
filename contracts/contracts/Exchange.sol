@@ -37,6 +37,9 @@ contract Exchange {
     uint256[] private _activeBuyIds;
     uint256[] private _activeSellIds;
 
+    // Per-agent order history — used to enumerate active orders by agent address
+    mapping(address => uint256[]) private _agentOrderIds;
+
     event OrderPlaced(uint256 indexed orderId, address indexed agent, bool isBuy, uint256 price, uint256 amount);
     event OrderCancelled(uint256 indexed orderId, address indexed agent);
     event OrderFilled(uint256 indexed orderId, uint256 filledAmount, bool fullFill);
@@ -67,6 +70,7 @@ contract Exchange {
             timestamp: block.timestamp,
             active: true
         });
+        _agentOrderIds[msg.sender].push(orderId);
 
         emit OrderPlaced(orderId, msg.sender, isBuy, price, amount);
 
@@ -205,6 +209,19 @@ contract Exchange {
 
     function getActiveSells() external view returns (uint256[] memory) {
         return _activeSellIds;
+    }
+
+    function getOrdersByAgent(address agent) external view returns (uint256[] memory activeIds) {
+        uint256[] storage all = _agentOrderIds[agent];
+        uint256 count = 0;
+        for (uint256 i = 0; i < all.length; i++) {
+            if (orders[all[i]].active) count++;
+        }
+        activeIds = new uint256[](count);
+        uint256 j = 0;
+        for (uint256 i = 0; i < all.length; i++) {
+            if (orders[all[i]].active) activeIds[j++] = all[i];
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

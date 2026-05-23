@@ -11,10 +11,11 @@ export function AgentGrid() {
     'momentum_trader',
     'arbitrage_agent',
     'risk_manager',
+    'noise_trader',
   ].map((id) => agents[id]).filter(Boolean);
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 h-full overflow-y-auto pr-1">
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 pr-1">
       {agentList.map((agent) => (
         <AgentCard key={agent.agent_id} agent={agent} />
       ))}

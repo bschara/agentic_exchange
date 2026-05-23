@@ -21,15 +21,17 @@ const HARDHAT_PKS = [
   '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a', // Account #2 momentum_trader
   '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6', // Account #3 arbitrage_agent
   '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926b', // Account #4 risk_manager
+  '0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e', // Account #5 noise_trader
 ];
 
-const AGENT_IDS = ['market_maker', 'momentum_trader', 'arbitrage_agent', 'risk_manager'];
+const AGENT_IDS = ['market_maker', 'momentum_trader', 'arbitrage_agent', 'risk_manager', 'noise_trader'];
 
 const AGENT_META = {
   market_maker:    { name: 'MM-Prime',       strategy: 'Market Making' },
   momentum_trader: { name: 'Momentum-Alpha', strategy: 'Momentum Trading' },
   arbitrage_agent: { name: 'Arb-Scanner',    strategy: 'Arbitrage' },
   risk_manager:    { name: 'Risk-Shield',    strategy: 'Risk Management' },
+  noise_trader:    { name: 'Noise-Bot',      strategy: 'Random Noise' },
 };
 
 const PROMPTS = {
@@ -63,11 +65,16 @@ const PROMPTS = {
     'SELL if there is no best ask, or if the on-chain last trade price is more than $5 above ETH reference (resist the spike). ' +
     'If both conditions are neutral, BUY if last trade is below reference, SELL if above. ' +
     'Respond with exactly one word: BUY or SELL.',
+  noise_trader:
+    'You are Noise-Bot, a random noise trading agent on the Somnia blockchain. ' +
+    'Your goal is to keep the market active with unpredictable orders. ' +
+    'If the ETH reference price ends in an even digit, BUY. If odd, SELL. ' +
+    'Respond with exactly one word: BUY or SELL.',
 };
 
 async function main() {
-  const [deployer, mm, momentum, arb, risk] = await hre.ethers.getSigners();
-  const agentSigners = [mm, momentum, arb, risk];
+  const [deployer, mm, momentum, arb, risk, noise] = await hre.ethers.getSigners();
+  const agentSigners = [mm, momentum, arb, risk, noise];
 
   console.log('\n═══ Local Hardhat Deployment ══════════════════════════════');
   console.log('Deployer:', deployer.address);
@@ -123,9 +130,9 @@ async function main() {
   }
 
   // Fund coordinator (deposit=0 so any balance satisfies the guard, but send some ETH anyway)
-  const fundTx = await coordinator.fund({ value: hre.ethers.parseEther('1.0') });
+  const fundTx = await coordinator.fund({ value: hre.ethers.parseEther('10.0') });
   await fundTx.wait();
-  console.log('\nCoordinator funded: 1.0 ETH');
+  console.log('\nCoordinator funded: 10.0 ETH');
 
   // Register agents in AgentRegistry + fund their treasuries
   console.log('\n─── Registering agents & funding treasuries ───────────────');
@@ -174,6 +181,7 @@ async function main() {
       momentum_trader: { address: agentSigners[1].address, pk: HARDHAT_PKS[2] },
       arbitrage_agent: { address: agentSigners[2].address, pk: HARDHAT_PKS[3] },
       risk_manager:    { address: agentSigners[3].address, pk: HARDHAT_PKS[4] },
+      noise_trader:    { address: agentSigners[4].address, pk: HARDHAT_PKS[5] },
     },
   };
 
@@ -194,6 +202,7 @@ async function main() {
   console.log(`MOMENTUM_TRADER_PK=${HARDHAT_PKS[2]}`);
   console.log(`ARBITRAGE_AGENT_PK=${HARDHAT_PKS[3]}`);
   console.log(`RISK_MANAGER_PK=${HARDHAT_PKS[4]}`);
+  console.log(`NOISE_TRADER_PK=${HARDHAT_PKS[5]}`);
   console.log('════════════════════════════════════════════════════════════\n');
 
   console.log('Next steps:');

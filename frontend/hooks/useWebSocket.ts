@@ -25,6 +25,9 @@ function dispatch(msg: WSMessage) {
 
         if (prev && agent.decisions_total > prev.decisions_total && agent.last_decision) {
           const price = agent.last_price > 0 ? `$${agent.last_price.toFixed(2)}` : '—';
+          const recentFill = msg.data.recent_fills?.find(
+            (f) => f.buyer_agent === id || f.seller_agent === id
+          );
           useFeedStore.getState().addItem({
             id: `${Date.now()}-${id}`,
             agent_id: id,
@@ -32,6 +35,7 @@ function dispatch(msg: WSMessage) {
             message: `${agent.last_decision} order at ${price}`,
             category: agent.last_decision === 'HOLD' ? 'system' : 'order',
             timestamp: Math.floor(Date.now() / 1000),
+            tx_hash: recentFill?.tx_hash,
           });
         }
 

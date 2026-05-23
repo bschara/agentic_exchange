@@ -48,6 +48,7 @@ interface ILLMAgent {
 
 interface IExchange {
     function placeOrder(bool isBuy, uint256 price, uint256 amount) external returns (uint256 orderId);
+    function cancelOrder(uint256 orderId) external;
     function getLastTradePrice() external view returns (uint256);
     function hasTraded() external view returns (bool);
     function getBestBid() external view returns (uint256 price, bool exists);
@@ -100,6 +101,9 @@ contract AgentCoordinator {
     }
     mapping(uint256 => LLMRequest) public pendingLLMRequests;
 
+    // Tracks the last order placed per agent so stale orders can be cancelled before requoting
+    mapping(string => uint256) public lastOrderId;
+
     string[] private _allowedValues;
 
     // ── Events ───────────────────────────────────────────────────────────────────
@@ -136,6 +140,7 @@ contract AgentCoordinator {
 
         _allowedValues.push("BUY");
         _allowedValues.push("SELL");
+        _allowedValues.push("HOLD");
     }
 
     receive() external payable {}
@@ -265,6 +270,32 @@ contract AgentCoordinator {
 
         if (status != IAgentRequester.ResponseStatus.Success || responses.length == 0) {
             emit DecisionFailed(requestId, req.agentId, "No consensus or timeout");
+            _retrigger(req.agentId);
+            return;
+        }
+
+        // Cancel stale order from the previous cycle before placing a new one
+        uint256 prev = lastOrderId[req.agentId];
+        if (prev > 0) {
+            try exchange.cancelOrder(prev) {} catch {}
+            lastOrderId[req.agentId] = 0;
+        }
+
+        AgentConfig memory cfg = agentConfigs[req.agentId];
+        uint256 basePrice = _toWei(req.fetchedPrice, cfg.decimals);
+
+        // Market maker posts both sides simultaneously to actually make markets
+        if (_strEq(req.agentId, "market_maker")) {
+            uint256 bidPrice = basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
+            uint256 askPrice = basePrice * (10000 + PRICE_OFFSET_BPS) / 10000;
+            try exchange.placeOrder(true,  bidPrice, ORDER_AMOUNT) returns (uint256 bidId) {
+                emit DecisionExecuted(requestId, req.agentId, "BUY",  bidPrice, bidId);
+            } catch {}
+            try exchange.placeOrder(false, askPrice, ORDER_AMOUNT) returns (uint256 askId) {
+                lastOrderId[req.agentId] = askId;
+                emit DecisionExecuted(requestId, req.agentId, "SELL", askPrice, askId);
+            } catch {}
+            _retrigger(req.agentId);
             return;
         }
 
@@ -279,17 +310,13 @@ contract AgentCoordinator {
             return;
         }
 
-        // Use last on-chain fill price as base; fall back to fetched price scaled to 1e18
-        AgentConfig memory cfg = agentConfigs[req.agentId];
-        uint256 basePrice = exchange.hasTraded()
-            ? exchange.getLastTradePrice()
-            : _toWei(req.fetchedPrice, cfg.decimals);
-
+        // Always price relative to the live fetched reference to prevent drift
         uint256 orderPrice = isBuy
             ? basePrice * (10000 + PRICE_OFFSET_BPS) / 10000
             : basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
 
         try exchange.placeOrder(isBuy, orderPrice, ORDER_AMOUNT) returns (uint256 orderId) {
+            lastOrderId[req.agentId] = orderId;
             emit DecisionExecuted(requestId, req.agentId, decision, orderPrice, orderId);
         } catch {
             emit DecisionFailed(requestId, req.agentId, "placeOrder reverted");

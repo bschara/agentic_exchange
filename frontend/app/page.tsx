@@ -2,6 +2,7 @@
 
 import dynamic from 'next/dynamic';
 import { Header } from '@/components/layout/Header';
+import { LatencyHero } from '@/components/layout/LatencyHero';
 import { ActivityFeed } from '@/components/layout/ActivityFeed';
 import { OrderBook } from '@/components/chart/OrderBook';
 import { RecentTrades } from '@/components/chart/RecentTrades';
@@ -17,6 +18,7 @@ export default function Dashboard() {
   return (
     <div className="flex flex-col h-screen overflow-hidden">
       <Header />
+      <LatencyHero />
 
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden gap-0">
@@ -40,13 +42,13 @@ export default function Dashboard() {
 
         {/* Right: Agent grid + scoreboard */}
         <div className="w-[480px] xl:w-[560px] flex-none flex flex-col overflow-hidden">
-          <div className="flex-none p-3 pb-2">
+          <div className="flex-1 min-h-0 overflow-y-auto p-3 pb-2">
             <div className="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-3 px-1">
               Autonomous Agents
             </div>
             <AgentGrid />
           </div>
-          <div className="flex-1 px-3 pb-3 overflow-y-auto border-t border-white/5 pt-3">
+          <div className="flex-none px-3 pb-3 border-t border-white/5 pt-3">
             <AgentScoreboard />
           </div>
         </div>

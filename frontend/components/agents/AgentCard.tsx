@@ -2,7 +2,6 @@
 
 import { AgentState, AgentStatus } from '@/lib/types';
 import { AgentStatusBadge } from './AgentStatusBadge';
-import { ReasoningPanel } from './ReasoningPanel';
 import { ExternalLink } from 'lucide-react';
 
 const AGENT_ICONS: Record<string, string> = {
@@ -10,6 +9,7 @@ const AGENT_ICONS: Record<string, string> = {
   momentum_trader: '📈',
   arbitrage_agent: '🔍',
   risk_manager:    '🛡️',
+  noise_trader:    '🎲',
 };
 
 const AGENT_COLORS: Record<string, string> = {
@@ -17,6 +17,7 @@ const AGENT_COLORS: Record<string, string> = {
   momentum_trader: 'border-emerald-500/30',
   arbitrage_agent: 'border-violet-500/30',
   risk_manager:    'border-yellow-500/30',
+  noise_trader:    'border-pink-500/30',
 };
 
 const AGENT_GLOW: Record<string, string> = {
@@ -24,6 +25,15 @@ const AGENT_GLOW: Record<string, string> = {
   momentum_trader: 'hover:border-emerald-500/50 hover:shadow-[0_0_20px_rgba(16,185,129,0.1)]',
   arbitrage_agent: 'hover:border-violet-500/50 hover:shadow-[0_0_20px_rgba(139,92,246,0.1)]',
   risk_manager:    'hover:border-yellow-500/50 hover:shadow-[0_0_20px_rgba(234,179,8,0.1)]',
+  noise_trader:    'hover:border-pink-500/50 hover:shadow-[0_0_20px_rgba(236,72,153,0.1)]',
+};
+
+const AGENT_STRATEGIES: Record<string, string> = {
+  market_maker:    'Posts bid AND ask simultaneously. Profits from the spread.',
+  momentum_trader: 'Rides trends. Buys into upward momentum, sells into downward.',
+  arbitrage_agent: 'Exploits gaps between CoinGecko reference price and on-chain price.',
+  risk_manager:    'Stabilizes markets. Supports crashes, resists spikes.',
+  noise_trader:    'Random order flow — keeps the book alive.',
 };
 
 const DECISION_COLORS: Record<string, string> = {
@@ -37,7 +47,7 @@ const explorerBase =
 
 function agentStatus(agent: AgentState): AgentStatus {
   if (agent.loop_stopped) return 'STOPPED';
-  if (agent.decisions_total > 0) return 'ACTIVE';
+  if (agent.decisions_total > 0 || agent.orders_placed > 0) return 'ACTIVE';
   return 'WAITING';
 }
 
@@ -51,7 +61,7 @@ export function AgentCard({ agent }: { agent: AgentState }) {
 
   return (
     <div
-      className={`flex flex-col gap-3 p-4 rounded-xl bg-black/40 backdrop-blur border transition-all duration-300 ${AGENT_COLORS[agent.agent_id]} ${AGENT_GLOW[agent.agent_id]}`}
+      className={`flex flex-col gap-2 p-3 rounded-xl bg-black/40 backdrop-blur border transition-all duration-300 ${AGENT_COLORS[agent.agent_id]} ${AGENT_GLOW[agent.agent_id]}`}
     >
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -70,23 +80,38 @@ export function AgentCard({ agent }: { agent: AgentState }) {
         <AgentStatusBadge status={status} />
       </div>
 
+      {/* Strategy description */}
+      <p className="text-[10px] text-gray-600 leading-tight">
+        {AGENT_STRATEGIES[agent.agent_id]}
+      </p>
+
       {/* Stats row */}
-      <div className="grid grid-cols-3 gap-2 text-center">
-        <div className="bg-white/5 rounded-lg px-2 py-1.5">
-          <p className="text-xs text-gray-500">Treasury</p>
-          <p className="text-xs font-mono font-bold text-white">
-            {agent.treasury_balance.toFixed(3)} STT
+      <div className="grid grid-cols-4 gap-1.5 text-center">
+        <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+          <p className="text-[10px] text-gray-500">Treasury</p>
+          <p className="text-[10px] font-mono font-bold text-white">
+            {agent.treasury_balance.toFixed(2)}
           </p>
         </div>
-        <div className="bg-white/5 rounded-lg px-2 py-1.5">
-          <p className="text-xs text-gray-500">Last</p>
-          <p className={`text-xs font-mono font-bold ${lastDecisionColor}`}>
+        <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+          <p className="text-[10px] text-gray-500">Last</p>
+          <p className={`text-[10px] font-mono font-bold ${lastDecisionColor}`}>
             {agent.last_decision ?? '—'}
           </p>
         </div>
-        <div className="bg-white/5 rounded-lg px-2 py-1.5">
-          <p className="text-xs text-gray-500">Decisions</p>
-          <p className="text-xs font-mono font-bold text-white">{agent.decisions_total}</p>
+        <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+          <p className="text-[10px] text-gray-500">Decisions</p>
+          <p className="text-[10px] font-mono font-bold text-white">{agent.decisions_total}</p>
+        </div>
+        <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+          <p className="text-[10px] text-gray-500">Position</p>
+          <p className={`text-[10px] font-mono font-bold ${
+            (agent.net_position ?? 0) > 0.001 ? 'text-emerald-400' :
+            (agent.net_position ?? 0) < -0.001 ? 'text-red-400' : 'text-gray-600'
+          }`}>
+            {(agent.net_position ?? 0) > 0.001 ? 'LONG' :
+             (agent.net_position ?? 0) < -0.001 ? 'SHORT' : 'FLAT'}
+          </p>
         </div>
       </div>
 
@@ -114,14 +139,6 @@ export function AgentCard({ agent }: { agent: AgentState }) {
         </div>
       )}
 
-      {/* Decision history */}
-      <div className="bg-black/30 rounded-lg p-2.5 border border-white/5 flex-1">
-        <p className="text-xs text-gray-600 mb-1.5 font-semibold uppercase tracking-wider">
-          Decision History
-        </p>
-        <ReasoningPanel agentId={agent.agent_id} />
-      </div>
-
       {/* Footer */}
       <div className="flex items-center justify-between text-xs text-gray-600">
         <span>
@@ -133,7 +150,7 @@ export function AgentCard({ agent }: { agent: AgentState }) {
           </span>
         ) : agent.last_price > 0 ? (
           <a
-            href={`${explorerBase}/address/${agent.agent_id}`}
+            href={`${explorerBase}/address/${agent.wallet_address || agent.agent_id}`}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1 text-violet-400 hover:text-violet-300 transition-colors"

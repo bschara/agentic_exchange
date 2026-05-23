@@ -14,7 +14,7 @@
 
 ## What It Is
 
-Four AI agents autonomously trade on the Somnia blockchain (chain 50312). Every trading decision is validated by Somnia's decentralized LLM inference agent — not an off-chain bot. Every order is matched by a real on-chain limit order book. A live dashboard shows visible decision flow, real-time charts, event injection, and live on-chain metrics.
+Five AI agents autonomously trade on the Somnia blockchain (chain 50312). Every trading decision is validated by Somnia's decentralized LLM inference agent — not an off-chain bot. Every order is matched by a real on-chain limit order book. A live dashboard shows visible decision flow, real-time charts, a full-width latency comparison panel, event injection, and live on-chain metrics.
 
 ---
 
@@ -23,6 +23,7 @@ Four AI agents autonomously trade on the Somnia blockchain (chain 50312). Every 
 On startup, the orchestrator fires one `triggerAgentDecision()` per agent — that's the only Python transaction ever sent. From that point the `AgentCoordinator` self-loops forever: `handleDecision()` calls `_retrigger()` at the end of every cycle. Python never touches the contracts again.
 
 Three background loops keep the dashboard live:
+
 - **Trade event poll** (1s) — reads `TradeExecuted` events → drives the price chart
 - **Snapshot broadcast** (2s) — pushes market state to WebSocket clients
 - **Contract metrics poll** (5s) — reads coordinator events and contract state → emits `chain_metrics`
@@ -31,16 +32,19 @@ Three background loops keep the dashboard live:
 
 ## Agents
 
-| Agent | Name | Strategy | Triggers |
-|-------|------|----------|----------|
-| ⚖️ Market Maker | MM-Prime | Places bid/ask, captures spread | Widens spread when volatility > 3% or Risk warning received |
-| 📈 Momentum Trader | Momentum-Alpha | Enters long/short on breakouts | 5-bar consecutive UP/DOWN trend → enter position |
-| 🔍 Arbitrage Agent | Arb-Scanner | Exploits pricing gaps | Bid-ask spread > 0.5% → place order at midpoint |
-| 🛡️ Risk Manager | Risk-Shield | Monitors exposure, coordinates agents | Volatility > 3% → broadcasts reduce-size warning to all agents |
+| Agent              | Name           | Strategy                                    | How it works                                                                     |
+| ------------------ | -------------- | ------------------------------------------- | -------------------------------------------------------------------------------- |
+| ⚖️ Market Maker    | MM-Prime       | Dual-sided quoting, captures spread         | Places **both** a bid and an ask each cycle; cancels stale orders before placing |
+| 📈 Momentum Trader | Momentum-Alpha | Rides trends, enters long/short on momentum | Buys into upward momentum (on-chain ≥ reference), sells into downward            |
+| 🔍 Arbitrage Agent | Arb-Scanner    | Exploits reference vs on-chain price gap    | Buys when on-chain is underpriced vs CoinGecko, sells when overpriced            |
+| 🛡️ Risk Manager    | Risk-Shield    | Stabilises extremes, provides liquidity     | Buys when on-chain is >$5 below reference; sells when >$5 above                  |
+| 🎲 Noise Bot       | Noise-Bot      | Random order flow, keeps book alive         | Python-only loop placing random orders every 4–6 s (no LLM overhead)             |
 
-**All 4 agents are Somnia-native** when deployed: on startup the orchestrator fires one `triggerAgentDecision()` per agent. From that point the contract is fully self-sustaining — `handleDecision()` calls `_retrigger()` at the end of every cycle, keeping each agent's loop alive with no further Python involvement. If the coordinator runs out of STT, it emits `LoopStopped(agentId, reason, balance)` and halts gracefully. Claude claude-sonnet-4-6 is used only in simulation mode.
+**4 agents are Somnia-native** when deployed (market_maker, momentum_trader, arbitrage_agent, risk_manager): on startup the orchestrator fires one `triggerAgentDecision()` per agent. From that point the contract is fully self-sustaining — `handleDecision()` calls `_retrigger()` at the end of every cycle. `noise_trader` runs as a pure Python coroutine placing random orders directly via the Exchange contract, keeping the book alive between LLM cycles. If the coordinator runs out of STT, it emits `LoopStopped(agentId, reason, balance)` and halts gracefully.
 
-**On-chain metrics:** The backend polls coordinator events every 5s — `DecisionExecuted`, `DecisionFailed`, `LLMRequestFired`, `LoopStopped` — and reads live contract state (order book depth, coordinator STT balance, per-agent treasury balances). These are broadcast as `chain_metrics` WebSocket messages and available at `GET /chain-metrics`.
+**Cancel-before-place:** `AgentCoordinator` tracks `lastOrderId` per agent and cancels the previous order before placing a new one, preventing order book bloat. Market Maker places two orders per cycle (bid + ask) at ±0.1% around the reference price.
+
+**On-chain metrics:** The backend polls coordinator events every 5s — `DecisionExecuted`, `DecisionFailed`, `LLMRequestFired`, `LoopStopped` — and reads live contract state (order book depth, coordinator STT balance, per-agent treasury balances, net positions). These are broadcast as `chain_metrics` WebSocket messages and available at `GET /chain-metrics`.
 
 ---
 
@@ -62,14 +66,14 @@ Three background loops keep the dashboard live:
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │  Exchange.sol  (real on-chain LOB with matching engine)      │    │
 │  │  placeOrder() → _matchOrder() → TradeExecuted(price,amount) │    │
-│  │  getBestBid() · getBestAsk() · getLastTradePrice()          │    │
+│  │  cancelOrder() · getOrdersByAgent() · getBestBid/Ask()      │    │
 │  └─────────────────────┬───────────────────────┬──────────────┘    │
 │                         │ placeOrder (callback)  │ events polled     │
 │  ┌──────────────────────┴──┐  ┌────────────────┴──────────────┐    │
 │  │ AgentRegistry · Treasury│  │  AgentCoordinator.sol          │    │
 │  └─────────────────────────┘  │  triggerAgentDecision() ×1/agent│   │
-│                                │  handlePriceData() callback     │    │
-│                                │  handleDecision() → placeOrder  │    │
+│                                │  cancel lastOrderId → placeOrder│   │
+│                                │  MM: dual bid+ask per cycle     │    │
 │                                │  _retrigger() → self-loop       │    │
 │                                └────────────────┬──────────────┘    │
 │  ┌──────────────────────────────────────         │ platform fires   │
@@ -79,20 +83,23 @@ Three background loops keep the dashboard live:
 │  │  → multi-validator consensus ─────────────────┘                  │
 │  └──────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
-         ↑ 1 startup tx per agent (6 gwei)     ↑ event polling (5s)
+     ↑ 1 startup tx per agent (6 gwei)  ↑ noise_trader direct orders
 ┌────────┴─────────────────────────────────────────────────────────────┐
 │                         FastAPI Backend                               │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │  trade event poll (1s)  ──► PriceEngine ──► MarketStateBus   │  │
 │  │  snapshot broadcast (2s) ──────────────────────────────────►  │  │
-│  │  contract metrics poll (5s) ──► chain_metrics broadcast ───►  │  │
+│  │  contract metrics poll (5s) ──► chain_metrics + risk_warning  │  │
+│  │  noise_trader_loop (4-6s) → random orders directly to Exchange│  │
 │  └───────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │ WebSocket  ws://localhost:8000/ws
 ┌──────────────────────────────▼───────────────────────────────────────┐
 │                    Next.js Dashboard                                  │
-│  CandlestickChart · OrderBook · AgentCards · AgentScoreboard · Feed  │
-│  Each agent card: ⬡ ON-CHAIN LLM badge (violet when Somnia active)  │
+│  LatencyHero (full-width: Somnia vs Solana vs Ethereum latency)      │
+│  CandlestickChart · OrderBook · AgentCards (5) · Scoreboard · Feed   │
+│  Agent cards: strategy desc, net position (LONG/SHORT/FLAT), P&L     │
+│  ActivityFeed: tx hashes link to shannon-explorer.somnia.network     │
 │  Zustand: marketStore · agentStore · feedStore                       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -114,17 +121,20 @@ cd contracts && npm install && cd ..
 ```
 
 Terminal 1 — start a local Hardhat node:
+
 ```bash
 cd contracts && npx hardhat node
 ```
 
 Terminal 2 — deploy contracts and write `somnia-local.json`:
+
 ```bash
 cd contracts && npx hardhat run scripts/deploy-local.js --network localhost
 # Prints env vars — copy them into backend/.env
 ```
 
 Terminal 3 — start everything (backend + frontend + platform daemon):
+
 ```bash
 ./start.sh
 ```
@@ -132,13 +142,14 @@ Terminal 3 — start everything (backend + frontend + platform daemon):
 `start.sh` auto-detects `SOMNIA_RPC_URL=http://127.0.0.1:8545` in `backend/.env` and starts the `platform-daemon.js` in a third tmux pane alongside the backend and frontend.
 
 Smoke-test the contracts (optional, before starting the backend):
+
 ```bash
 cd contracts && npx hardhat run scripts/test-local.js --network localhost
 ```
 
 ### Option B — Somnia Testnet
 
-Prerequisites: Node.js 18+, Python 3.12+, 5 funded Somnia testnet wallets — see [Deploying Onchain](#deploying-onchain).
+Prerequisites: Node.js 18+, Python 3.12+, 6 funded Somnia testnet wallets (1 deployer + 5 agents) — see [Deploying Onchain](#deploying-onchain).
 
 ```bash
 git clone <repo>
@@ -157,15 +168,15 @@ Opens backend at `http://localhost:8000` and frontend at `http://localhost:3000`
 
 ## Deploying Onchain
 
-### Step 1 — Generate 5 wallets
+### Step 1 — Generate 6 wallets
 
 Run from `contracts/` (ethers is already installed):
 
 ```bash
 node -e "
 const {ethers} = require('ethers');
-const labels = ['DEPLOYER','MARKET_MAKER','MOMENTUM_TRADER','ARBITRAGE_AGENT','RISK_MANAGER'];
-for (let i = 0; i < 5; i++) {
+const labels = ['DEPLOYER','MARKET_MAKER','MOMENTUM_TRADER','ARBITRAGE_AGENT','RISK_MANAGER','NOISE_TRADER'];
+for (let i = 0; i < 6; i++) {
   const w = ethers.Wallet.createRandom();
   console.log(labels[i] + '_PK=' + w.privateKey);
   console.log(labels[i] + '_ADDR=' + w.address);
@@ -174,11 +185,11 @@ for (let i = 0; i < 5; i++) {
 "
 ```
 
-Save the output — you'll need all 5 private keys.
+Save the output — you'll need all 6 private keys.
 
 ### Step 2 — Fund wallets via Somnia faucet
 
-Visit **https://testnet.somnia.network/** and request STT for each of the 5 wallet addresses. Each wallet needs at least 0.5 STT (deployer needs ~1 STT for contract deployment).
+Visit **https://testnet.somnia.network/** and request STT for each of the 6 wallet addresses. Each wallet needs at least 0.5 STT (deployer needs ~1 STT for contract deployment).
 
 ### Step 3 — Configure contracts and deploy
 
@@ -189,15 +200,15 @@ cp .env.example .env
 
 npx hardhat run scripts/deploy.js --network somnia
 # Deploys Exchange, AgentRegistry, Treasury, AgentCoordinator
-# Sets per-agent system prompts on-chain for all 4 agents
-# Funds AgentCoordinator with 0.05 STT for LLM request deposits
+# Sets per-agent system prompts on-chain for all 5 agents
+# Funds AgentCoordinator with 0.2 STT for LLM request deposits
 # Prints the exact env vars to copy
 ```
 
 ### Step 4 — Register agents and fund treasuries
 
 ```bash
-# Fill the 4 agent PKs in contracts/.env first
+# Fill the 5 agent PKs in contracts/.env first
 npx hardhat run scripts/seed.js --network somnia
 # Registers agents in AgentRegistry, deposits 0.1 STT each in Treasury
 ```
@@ -205,6 +216,7 @@ npx hardhat run scripts/seed.js --network somnia
 ### Step 5 — Configure backend and restart
 
 Copy the printed env vars from deploy.js into `backend/.env`:
+
 ```
 EXCHANGE_ADDRESS=0x...
 AGENT_REGISTRY_ADDRESS=0x...
@@ -214,9 +226,11 @@ MARKET_MAKER_PK=0x...
 MOMENTUM_TRADER_PK=0x...
 ARBITRAGE_AGENT_PK=0x...
 RISK_MANAGER_PK=0x...
+NOISE_TRADER_PK=0x...
 ```
 
 Then restart:
+
 ```bash
 ./start.sh
 ```
@@ -229,13 +243,13 @@ Verify at the Somnia explorer: **https://shannon-explorer.somnia.network**
 
 Click the event injection buttons to watch agents react in real-time:
 
-| Button | Effect | What to watch |
-|--------|--------|--------------|
-| WHALE BUY +3% | Instant +3% price shock | Momentum Trader enters long; Risk Manager monitors exposure |
-| WHALE SELL -3% | Instant -3% price shock | Momentum Trader enters short; MM widens spread |
-| VOL SPIKE | 5× volatility for 30 seconds | MM-Prime widens spread; all agents reduce position sizes |
-| NEWS EVENT | 3× volatility + 1.5% upside | Mixed agent reactions — some buy, Risk Manager monitors |
-| FLASH CRASH | -8% price shock + 8× volatility | Risk Manager broadcasts high-severity warning; all agents scramble |
+| Button         | Effect                          | What to watch                                                      |
+| -------------- | ------------------------------- | ------------------------------------------------------------------ |
+| WHALE BUY +3%  | Instant +3% price shock         | Momentum Trader enters long; Risk Manager monitors exposure        |
+| WHALE SELL -3% | Instant -3% price shock         | Momentum Trader enters short; MM widens spread                     |
+| VOL SPIKE      | 5× volatility for 30 seconds    | MM-Prime widens spread; all agents reduce position sizes           |
+| NEWS EVENT     | 3× volatility + 1.5% upside     | Mixed agent reactions — some buy, Risk Manager monitors            |
+| FLASH CRASH    | -8% price shock + 8× volatility | Risk Manager broadcasts high-severity warning; all agents scramble |
 
 ---
 
@@ -246,14 +260,16 @@ somnia_hackathon/
 ├── contracts/              # Hardhat + Solidity
 │   ├── contracts/
 │   │   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
-│   │   ├── AgentCoordinator.sol # IAgentRequester integration — all 4 agents Somnia-native
+│   │   │                        # getOrdersByAgent() view for per-agent active order IDs
+│   │   ├── AgentCoordinator.sol # IAgentRequester integration — 4 agents Somnia-native
+│   │   │                        # lastOrderId mapping: cancel-before-place, MM dual-sided
 │   │   ├── AgentRegistry.sol    # agent registration + reputation
 │   │   ├── Treasury.sol         # per-agent balances
 │   │   └── MockPlatform.sol     # local dev: simulates Somnia platform callbacks
 │   ├── scripts/
-│   │   ├── deploy.js            # testnet: deploys all contracts, sets on-chain prompts
+│   │   ├── deploy.js            # testnet: deploys all contracts, sets on-chain prompts (5 agents)
 │   │   ├── seed.js              # testnet: registers agents, funds treasuries
-│   │   ├── deploy-local.js      # local: deploys to Hardhat, writes somnia-local.json
+│   │   ├── deploy-local.js      # local: deploys to Hardhat, writes somnia-local.json (6 signers)
 │   │   ├── platform-daemon.js   # local: listens for MockPlatform events, fires price + LLM callbacks
 │   │   └── test-local.js        # local: one-shot smoke test for the full decision cycle
 │   └── deployments/
@@ -261,7 +277,8 @@ somnia_hackathon/
 │       └── somnia-local.json    # local addresses + ABIs + agent PKs (auto-generated by deploy-local.js)
 ├── backend/                # Python FastAPI
 │   ├── agents/
-│   │   └── orchestrator.py      # AGENT_CONFIGS, startup triggers, poll loops, metrics, _load_local_deployment()
+│   │   └── orchestrator.py      # AGENT_CONFIGS (5 agents), startup triggers, poll loops, metrics,
+│   │                            # _noise_trader_loop(), _load_local_deployment()
 │   ├── market/
 │   │   ├── state_bus.py         # async-safe shared state
 │   │   └── price_engine.py      # GBM price simulation + OHLCV builder
@@ -274,8 +291,12 @@ somnia_hackathon/
 │       └── routes_http.py       # REST endpoints
 └── frontend/               # Next.js 14
     ├── components/
+    │   ├── layout/
+    │   │   ├── LatencyHero.tsx  # full-width latency comparison: Somnia vs Solana vs Ethereum
+    │   │   └── ActivityFeed.tsx # activity feed with explorer tx hash links
     │   ├── chart/               # CandlestickChart (TradingView v5), OrderBook, RecentTrades
-    │   └── agents/              # AgentGrid, AgentCard, AgentScoreboard, ReasoningPanel, StatusBadge
+    │   └── agents/              # AgentGrid (5 agents), AgentCard (strategy desc + position),
+    │                            # AgentScoreboard (total P&L incl unrealized), ReasoningPanel, StatusBadge
     ├── store/                   # Zustand: marketStore, agentStore, feedStore
     └── hooks/
         └── useWebSocket.ts      # WS connect/reconnect + message dispatch
@@ -288,29 +309,31 @@ somnia_hackathon/
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Chart blank on load | Backend not running or WS URL wrong | Check `NEXT_PUBLIC_WS_URL` in `frontend/.env.local`; verify backend at `http://localhost:8000/health` |
-| No tx hashes visible | Contracts not deployed | Complete the deployment steps above |
-| `deploy.js` / `deploy-local.js` fails | Placeholder PK or insufficient funds | Verify `DEPLOYER_PRIVATE_KEY` is a real key with STT (testnet) or that `npx hardhat node` is running (local) |
-| `start.sh` exits with "Hardhat node not running" | Forgot to start `npx hardhat node` | Open a terminal, run `cd contracts && npx hardhat node`, then re-run `./start.sh` |
-| Agent cards show zeros after startup | Contracts not configured or still warming up | Wait 10s for first coordinator poll; check `/debug/config` endpoint to confirm addresses loaded |
-| `/chain-metrics` returns all zeros | `AGENT_COORDINATOR_ADDRESS` not set | Check `backend/.env` — if using local dev, `somnia-local.json` auto-loads addresses |
-| `LoopStopped` events in chain-metrics | Coordinator ran out of STT | Call `AgentCoordinator.fund()` with more STT; then POST to `/agents/trigger` to restart loops |
-| platform-daemon not started | Running without tmux or manually | Run `cd contracts && node scripts/platform-daemon.js` in a separate terminal |
-| Frontend WS disconnect loop | Backend crash | Check backend logs via `tmux attach -t agentic-exchange` |
+| Symptom                                          | Cause                                        | Fix                                                                                                          |
+| ------------------------------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Chart blank on load                              | Backend not running or WS URL wrong          | Check `NEXT_PUBLIC_WS_URL` in `frontend/.env.local`; verify backend at `http://localhost:8000/health`        |
+| No tx hashes visible                             | Contracts not deployed                       | Complete the deployment steps above                                                                          |
+| `deploy.js` / `deploy-local.js` fails            | Placeholder PK or insufficient funds         | Verify `DEPLOYER_PRIVATE_KEY` is a real key with STT (testnet) or that `npx hardhat node` is running (local) |
+| `start.sh` exits with "Hardhat node not running" | Forgot to start `npx hardhat node`           | Open a terminal, run `cd contracts && npx hardhat node`, then re-run `./start.sh`                            |
+| Agent cards show zeros after startup             | Contracts not configured or still warming up | Wait 10s for first coordinator poll; check `/debug/config` endpoint to confirm addresses loaded              |
+| `/chain-metrics` returns all zeros               | `AGENT_COORDINATOR_ADDRESS` not set          | Check `backend/.env` — if using local dev, `somnia-local.json` auto-loads addresses                          |
+| `LoopStopped` events in chain-metrics            | Coordinator ran out of STT                   | Call `AgentCoordinator.fund()` with more STT; then POST to `/agents/trigger` to restart loops                |
+| platform-daemon not started                      | Running without tmux or manually             | Run `cd contracts && node scripts/platform-daemon.js` in a separate terminal                                 |
+| Frontend WS disconnect loop                      | Backend crash                                | Check backend logs via `tmux attach -t agentic-exchange`                                                     |
+| Noise trader not placing orders                  | `NOISE_TRADER_PK` not set in `.env`          | Add `NOISE_TRADER_PK=0x...` to `backend/.env`; for local dev it auto-loads from `somnia-local.json`          |
+| Order book filling with stale orders             | Old coordinator without cancel-before-place  | Recompile and redeploy contracts after pulling latest `AgentCoordinator.sol`                                 |
 
 ---
 
 ## Somnia Network
 
-| | |
-|-|-|
-| **Chain** | Somnia Testnet |
-| **Chain ID** | 50312 |
-| **RPC** | https://dream-rpc.somnia.network |
+|              |                                         |
+| ------------ | --------------------------------------- |
+| **Chain**    | Somnia Testnet                          |
+| **Chain ID** | 50312                                   |
+| **RPC**      | https://dream-rpc.somnia.network        |
 | **Explorer** | https://shannon-explorer.somnia.network |
-| **Faucet** | https://testnet.somnia.network/ |
+| **Faucet**   | https://testnet.somnia.network/         |
 
 > Gas price is hardcoded at **6 gwei** throughout the codebase. Do not use dynamic gas estimation — it causes tx failures on Somnia testnet.
 

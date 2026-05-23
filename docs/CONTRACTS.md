@@ -1,6 +1,6 @@
 # Contracts — Agentic Exchange
 
-Four Solidity contracts on Somnia testnet (chain 50312). Exchange.sol is a real on-chain limit order book with automatic matching. AgentCoordinator.sol routes all 4 agents through Somnia's native LLM inference agent for on-chain validator consensus.
+Four Solidity contracts on Somnia testnet (chain 50312). Exchange.sol is a real on-chain limit order book with automatic matching. AgentCoordinator.sol routes 4 agents through Somnia's native LLM inference agent for on-chain validator consensus — with cancel-before-place and Market Maker dual-sided quoting built in. A 5th agent (noise_trader) places orders directly from Python without the coordinator.
 
 ---
 
@@ -19,7 +19,7 @@ contracts/
 │   └── MockPlatform.sol     # Local dev: simulates Somnia IAgentRequester callbacks
 ├── scripts/
 │   ├── deploy.js            # Testnet: deploys all 4 contracts, sets on-chain system prompts, writes JSON
-│   ├── seed.js              # Testnet: registers 4 agents in registry, funds each in treasury
+│   ├── seed.js              # Testnet: registers 5 agents in registry, funds each in treasury
 │   ├── verify.js            # Testnet: sanity check — reads agent list + balances from live contracts
 │   ├── deploy-local.js      # Local: deploys to Hardhat node, writes somnia-local.json (zero-config)
 │   ├── platform-daemon.js   # Local: watches MockPlatform events, fires price + LLM callbacks
@@ -37,7 +37,7 @@ contracts/
 
 - Node.js 18+
 - A funded deployer wallet (needs ~1 STT for deployment gas)
-- Four funded agent wallets (need ~0.5 STT each)
+- Five funded agent wallets (need ~0.5 STT each)
 - Somnia testnet faucet: **https://testnet.somnia.network/**
 
 ---
@@ -58,8 +58,8 @@ Run from `contracts/` (ethers is installed):
 ```bash
 node -e "
 const {ethers} = require('ethers');
-const labels = ['DEPLOYER','MARKET_MAKER','MOMENTUM_TRADER','ARBITRAGE_AGENT','RISK_MANAGER'];
-for (let i = 0; i < 5; i++) {
+const labels = ['DEPLOYER','MARKET_MAKER','MOMENTUM_TRADER','ARBITRAGE_AGENT','RISK_MANAGER','NOISE_TRADER'];
+for (let i = 0; i < 6; i++) {
   const w = ethers.Wallet.createRandom();
   console.log(labels[i] + '_PK=' + w.privateKey);
   console.log(labels[i] + '_ADDR=' + w.address);
@@ -86,6 +86,7 @@ MARKET_MAKER_PK=0x...
 MOMENTUM_TRADER_PK=0x...
 ARBITRAGE_AGENT_PK=0x...
 RISK_MANAGER_PK=0x...
+NOISE_TRADER_PK=0x...
 ```
 
 ### 5. Deploy contracts
@@ -106,6 +107,7 @@ System prompt set on-chain for market_maker
 System prompt set on-chain for momentum_trader
 System prompt set on-chain for arbitrage_agent
 System prompt set on-chain for risk_manager
+System prompt set on-chain for noise_trader
 AgentCoordinator funded with 0.2 STT
 
 ─── Add to backend/.env ───────────────────────────
@@ -122,7 +124,7 @@ AGENT_COORDINATOR_ADDRESS=0x4444...
 npx hardhat run scripts/seed.js --network somnia
 ```
 
-Registers all 4 agents in `AgentRegistry` and deposits 0.1 STT per agent into `Treasury`.
+Registers all 5 agents in `AgentRegistry` and deposits 0.1 STT per agent into `Treasury`. The noise_trader wallet is registered but its orders are placed directly (not via coordinator), so it doesn't consume STT from the coordinator balance.
 
 ### 7. Verify deployment
 
@@ -183,6 +185,7 @@ struct Trade {
 | `getActiveOrders()` | view | Returns combined array of active buy + sell order IDs |
 | `getActiveBuys()` | view | Returns active buy order IDs |
 | `getActiveSells()` | view | Returns active sell order IDs |
+| `getOrdersByAgent(address agent)` | view | Returns active order IDs for a specific agent wallet (filters `_agentOrderIds[agent]`) |
 
 State variables: `lastTradePrice` (public), `hasTraded` (public bool — true after first match).
 
@@ -205,10 +208,12 @@ event TradeExecuted(uint256 indexed tradeId, uint256 buyOrderId, uint256 sellOrd
 Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-triggers after every decision cycle — Python fires one `triggerAgentDecision()` per agent at startup; after that the loop runs entirely on-chain.
 
 **Key state:**
+
 - `systemPrompts` — `mapping(string => string)` keyed by agent ID; strategy-specific prompts set on-chain
 - `agentConfigs` — `mapping(string => AgentConfig)` — per-agent price URL, JSON selector, and decimal precision
 - `pendingPriceRequests` — maps `requestId` → `PriceRequest { agentId, exists }` (stage 1 in-flight)
 - `pendingLLMRequests` — maps `requestId` → `LLMRequest { agentId, fetchedPrice, exists }` (stage 2 in-flight)
+- `lastOrderId` — `mapping(string => uint256)` keyed by agent ID; most recent order placed per agent, used for cancel-before-place
 - `llmAgentId` — Somnia platform LLM agent ID (default `2`)
 - `jsonApiAgentId` — Somnia platform JSON API agent ID
 - `platform` — `IAgentRequester` at `0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776`
@@ -219,7 +224,7 @@ Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-trigg
 |----------|--------|-------------|
 | `triggerAgentDecision(string agentId)` | anyone | **Step 1.** Fires JSON API price fetch via `platform.createRequest`. Called once per agent at startup by the Python orchestrator; after that `_retrigger()` calls it on-chain. |
 | `handlePriceData(requestId, responses, status, ...)` | platform only | **Step 2 callback.** Decodes fetched price, reads Exchange on-chain state, builds context string, fires LLM inference via `platform.createRequest`. |
-| `handleDecision(requestId, responses, status, ...)` | platform only | **Step 3 callback.** Decodes BUY/SELL/HOLD from validator consensus, calls `Exchange.placeOrder()`, then calls `_retrigger()` to start the next cycle. |
+| `handleDecision(requestId, responses, status, ...)` | platform only | **Step 3 callback.** Cancels `lastOrderId[agentId]` (if set). Market Maker special-case: places both bid (−0.1%) and ask (+0.1%) and skips LLM result. All other agents: decodes BUY/SELL/HOLD, calls `Exchange.placeOrder()`, stores new `lastOrderId`. Calls `_retrigger()` to start the next cycle. |
 | `_retrigger(agentId)` | internal | Checks balance ≥ `deposit × 2`, fires next JSON API fetch, or emits `LoopStopped`. |
 | `setAgentConfig(agentId, url, selector, decimals)` | owner | Sets price URL and JSON path for an agent |
 | `setSystemPrompt(string agentId, string prompt)` | owner | Stores strategy prompt on-chain for an agent |
@@ -241,7 +246,9 @@ event LoopStopped(string agentId, string reason, uint256 balance);
 
 `LoopStopped` fires when `_retrigger()` cannot proceed — either because the coordinator's STT balance is below `deposit × 2`, or because no `agentConfig` is registered for that agent ID. Monitor this event to know when to top up via `fund()`.
 
-**Deployment:** `deploy.js` automatically sets `systemPrompts` and `agentConfigs` for all 4 agents and funds the coordinator with 0.2 STT. Each full cycle (JSON fetch + LLM inference) consumes 2 deposits. Top up via `fund()` to keep agents running. The Python backend monitors the coordinator balance and emits `loop_stopped_any` in the `chain_metrics` feed when a `LoopStopped` event is detected.
+**Deployment:** `deploy.js` automatically sets `systemPrompts` and `agentConfigs` for all 5 agents and funds the coordinator with 0.2 STT. Each full cycle (JSON fetch + LLM inference) consumes 2 deposits. Top up via `fund()` to keep agents running. The Python backend monitors the coordinator balance and emits `loop_stopped_any` in the `chain_metrics` feed when a `LoopStopped` event is detected.
+
+**Note:** `noise_trader` has a system prompt set on-chain (for completeness and testnet registration) but does not use the coordinator loop. Its orders are placed directly from the Python `_noise_trader_loop` coroutine.
 
 ---
 
@@ -329,7 +336,7 @@ cd contracts && npx hardhat node
 npx hardhat run scripts/deploy-local.js --network localhost
 ```
 
-This deploys `MockPlatform`, `Exchange`, `AgentRegistry`, `Treasury`, and `AgentCoordinator`, configures all 4 agent prompts and configs on-chain, funds the coordinator with 1 ETH, registers agents in the registry, and deposits 0.1 ETH per agent in the treasury. Writes `deployments/somnia-local.json` and prints the env vars to paste into `backend/.env`.
+This deploys `MockPlatform`, `Exchange`, `AgentRegistry`, `Treasury`, and `AgentCoordinator`, configures all 5 agent prompts and configs on-chain, funds the coordinator with 10 ETH, registers all 5 agents in the registry, and deposits 0.1 ETH per agent in the treasury. Uses 6 Hardhat signers (deployer + 5 agent wallets, accounts #0–#5). Writes `deployments/somnia-local.json` and prints the env vars to paste into `backend/.env`.
 
 ### Step 3 — Start the platform daemon (keep running)
 
@@ -338,6 +345,7 @@ node scripts/platform-daemon.js
 ```
 
 The daemon watches `MockPlatform.RequestCreated` events and immediately fires the appropriate callback:
+
 - **Price requests** (`handlePriceData` selector) → fetches live ETH/USD from CoinGecko, calls `simulatePriceCallback(requestId, price)`
 - **LLM requests** (`handleDecision` selector) → runs a local JS reimplementation of each agent's strategy (matching the on-chain prompts), calls `simulateLLMCallback(requestId, "BUY"|"SELL")`
 
@@ -367,7 +375,7 @@ Runs one full decision cycle per agent manually (no daemon needed), verifying `D
 
 1. Gets deployer signer from hardhat
 2. Deploys `Exchange`, `AgentRegistry`, `Treasury`, `AgentCoordinator` sequentially
-3. Calls `AgentCoordinator.setSystemPrompt()` for all 4 agents (market_maker, momentum_trader, arbitrage_agent, risk_manager) — prompts stored on-chain
+3. Calls `AgentCoordinator.setSystemPrompt()` for all 5 agents (market_maker, momentum_trader, arbitrage_agent, risk_manager, noise_trader) — prompts stored on-chain
 4. Funds `AgentCoordinator` with 0.2 STT for LLM inference deposits
 5. Reads compiled ABIs from `artifacts/`
 6. Writes `deployments/somnia-testnet.json` with addresses + ABIs
@@ -429,7 +437,7 @@ Both deployment files are intentionally **tracked in git**. They contain deploye
 
 **`deployments/somnia-testnet.json`** — written by `deploy.js`. The backend reads this for ABI loading when `SOMNIA_RPC_URL` points to testnet.
 
-**`deployments/somnia-local.json`** — written by `deploy-local.js`. Contains addresses, ABIs, **and** the deterministic Hardhat test account PKs for all 4 agents (these are public test keys, safe to commit). The backend's `_load_local_deployment()` reads this file at startup when `.env` has placeholder addresses, enabling zero-config local dev.
+**`deployments/somnia-local.json`** — written by `deploy-local.js`. Contains addresses, ABIs, **and** the deterministic Hardhat test account PKs for all 5 agents (these are public test keys, safe to commit). The backend's `_load_local_deployment()` reads this file at startup when `.env` has placeholder addresses, enabling zero-config local dev.
 
 ---
 

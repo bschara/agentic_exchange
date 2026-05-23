@@ -6,6 +6,7 @@ const AGENT_DEFAULTS: { agent_id: AgentState['agent_id']; agent_name: string }[]
   { agent_id: 'momentum_trader', agent_name: 'Momentum-Alpha' },
   { agent_id: 'arbitrage_agent', agent_name: 'Arb-Scanner' },
   { agent_id: 'risk_manager',    agent_name: 'Risk-Shield' },
+  { agent_id: 'noise_trader',    agent_name: 'Noise-Bot' },
 ];
 
 function makeDefaultAgent(agent_id: AgentState['agent_id'], agent_name: string): AgentState {
@@ -30,6 +31,9 @@ function makeDefaultAgent(agent_id: AgentState['agent_id'], agent_name: string):
     total_sell_volume: 0,
     avg_decision_latency_ms: 0,
     decision_latency_count: 0,
+    net_position: 0,
+    unrealized_pnl: 0,
+    wallet_address: '',
   };
 }
 

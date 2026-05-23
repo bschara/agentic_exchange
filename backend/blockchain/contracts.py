@@ -31,6 +31,7 @@ def _load_abis():
         {"inputs": [], "name": "getActiveOrders", "outputs": [{"name": "", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getActiveBuys", "outputs": [{"name": "", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getActiveSells", "outputs": [{"name": "", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "agent", "type": "address"}], "name": "getOrdersByAgent", "outputs": [{"name": "activeIds", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getBestBid", "outputs": [{"name": "price", "type": "uint256"}, {"name": "exists", "type": "bool"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getBestAsk", "outputs": [{"name": "price", "type": "uint256"}, {"name": "exists", "type": "bool"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "getLastTradePrice", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
