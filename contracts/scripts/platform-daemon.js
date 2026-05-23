@@ -6,7 +6,7 @@
 //   node scripts/platform-daemon.js
 //
 // Leave running while testing. The backend's startup triggers kick off the first cycle per agent;
-// the daemon keeps all 4 loops alive indefinitely.
+// the daemon keeps all 4 on-chain loops alive indefinitely. (noise_trader uses a Python loop.)
 
 import { ethers } from 'ethers';
 import fs from 'fs';
@@ -48,8 +48,8 @@ function makeDecision(agentId, refPrice, onChainPrice) {
       return oc < ref ? 'BUY' : 'SELL';
 
     case 'momentum_trader':
-      // BUY on upward momentum (ref >= on-chain), SELL on downward
-      return ref >= oc ? 'BUY' : 'SELL';
+      // Follow on-chain strength: BUY when on-chain is at/above reference (contrarian to market_maker)
+      return oc >= ref ? 'BUY' : 'SELL';
 
     case 'arbitrage_agent':
       // BUY if on-chain underpriced vs reference, SELL if overpriced
@@ -59,7 +59,11 @@ function makeDecision(agentId, refPrice, onChainPrice) {
       // Support market if on-chain is >$5 below ref; resist spike if >$5 above
       if (oc < ref - 5) return 'BUY';
       if (oc > ref + 5) return 'SELL';
-      return oc < ref ? 'BUY' : 'SELL';
+      // Neutral zone: mirror momentum_trader (contrarian to market_maker/arb)
+      return oc >= ref ? 'BUY' : 'SELL';
+
+    case 'noise_trader':
+      return Math.floor(ref) % 2 === 0 ? 'BUY' : 'SELL';
 
     default:
       return Math.random() < 0.5 ? 'BUY' : 'SELL';

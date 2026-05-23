@@ -33,10 +33,11 @@ export interface Fill {
   buyer_agent: string;
   seller_agent: string;
   block: number;
+  tx_hash?: string;
 }
 
 export interface AgentState {
-  agent_id: 'market_maker' | 'momentum_trader' | 'arbitrage_agent' | 'risk_manager';
+  agent_id: 'market_maker' | 'momentum_trader' | 'arbitrage_agent' | 'risk_manager' | 'noise_trader';
   agent_name: string;
   decisions_total: number;
   buy_count: number;
@@ -56,6 +57,9 @@ export interface AgentState {
   total_sell_volume: number;
   avg_decision_latency_ms: number;
   decision_latency_count: number;
+  net_position: number;
+  unrealized_pnl: number;
+  wallet_address: string;
 }
 
 export interface ChainMetrics {
@@ -89,6 +93,7 @@ export interface ActivityFeedItem {
   message: string;
   category: 'order' | 'trade' | 'warning' | 'event' | 'system';
   timestamp: number;
+  tx_hash?: string;
 }
 
 export interface RiskWarning {

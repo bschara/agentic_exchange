@@ -8,9 +8,10 @@ const AGENT_ICONS: Record<string, string> = {
   momentum_trader: '📈',
   arbitrage_agent: '🔍',
   risk_manager:    '🛡️',
+  noise_trader:    '🎲',
 };
 
-const MEDALS = ['🥇', '🥈', '🥉', '4️⃣'];
+const MEDALS = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
 
 function pnlColor(pnl: number): string {
   if (pnl > 0) return 'text-emerald-400';
@@ -35,7 +36,9 @@ export function AgentScoreboard() {
   const agents = useAgentStore((s) => s.agents);
 
   const ranked: AgentState[] = Object.values(agents).sort(
-    (a, b) => (b.trade_pnl ?? 0) - (a.trade_pnl ?? 0)
+    (a, b) =>
+      ((b.trade_pnl ?? 0) + (b.unrealized_pnl ?? 0)) -
+      ((a.trade_pnl ?? 0) + (a.unrealized_pnl ?? 0))
   );
 
   const hasData = ranked.some((a) => a.decisions_total > 0);
@@ -52,7 +55,9 @@ export function AgentScoreboard() {
       </div>
 
       {ranked.map((agent, idx) => {
-        const pnl = agent.trade_pnl ?? 0;
+        const realizedPnl = agent.trade_pnl ?? 0;
+        const unrealizedPnl = agent.unrealized_pnl ?? 0;
+        const pnl = realizedPnl + unrealizedPnl;
         const buyVol  = agent.total_buy_volume ?? 0;
         const sellVol = agent.total_sell_volume ?? 0;
         const latency = agent.avg_decision_latency_ms ?? 0;
@@ -84,6 +89,11 @@ export function AgentScoreboard() {
               <div className={`text-sm font-mono font-bold ${pnlColor(pnl)}`}>
                 {fmt(pnl)}
               </div>
+              {Math.abs(unrealizedPnl) > 0.01 && (
+                <div className={`text-[10px] font-mono ${pnlColor(unrealizedPnl)}`}>
+                  {fmt(unrealizedPnl)} unrlzd
+                </div>
+              )}
               {latency > 0 && (
                 <div className="text-[10px] text-gray-600 font-mono">
                   ~{latency.toFixed(0)}ms

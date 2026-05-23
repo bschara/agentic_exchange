@@ -1,7 +1,11 @@
 'use client';
 
+import { ExternalLink } from 'lucide-react';
 import { useFeedStore } from '@/store/feedStore';
 import { ActivityFeedItem } from '@/lib/types';
+
+const explorerBase =
+  process.env.NEXT_PUBLIC_SOMNIA_EXPLORER || 'https://shannon-explorer.somnia.network';
 
 const CATEGORY_COLORS: Record<ActivityFeedItem['category'], string> = {
   order: 'text-blue-400',
@@ -44,7 +48,19 @@ export function ActivityFeed() {
               {item.agent_name}
             </span>
             <span className="text-xs text-gray-300 max-w-[260px] truncate">{item.message}</span>
-            <span className="text-xs text-gray-600 ml-1 whitespace-nowrap">{timeAgo(item.timestamp)}</span>
+            {item.tx_hash ? (
+              <a
+                href={`${explorerBase}/tx/${item.tx_hash}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-0.5 text-xs text-gray-600 ml-1 whitespace-nowrap hover:text-violet-400 transition-colors"
+              >
+                {timeAgo(item.timestamp)}
+                <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+            ) : (
+              <span className="text-xs text-gray-600 ml-1 whitespace-nowrap">{timeAgo(item.timestamp)}</span>
+            )}
           </div>
         ))}
       </div>

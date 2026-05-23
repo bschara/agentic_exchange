@@ -1,6 +1,6 @@
 # Frontend — Agentic Exchange
 
-Next.js 14 App Router dashboard displaying four autonomous AI trading agents running on the Somnia blockchain in real-time.
+Next.js 14 App Router dashboard displaying five autonomous AI trading agents running on the Somnia blockchain in real-time. The dashboard opens with a full-width `LatencyHero` panel comparing Somnia's decision latency against Solana (~400 ms) and Ethereum (~12,000 ms).
 
 ---
 
@@ -16,15 +16,16 @@ frontend/
 ├── components/
 │   ├── layout/
 │   │   ├── Header.tsx       # Logo, live ticker (price + volume + spread), 5 event injection buttons
-│   │   └── ActivityFeed.tsx # Horizontal scrolling feed bar (color-coded by category)
+│   │   ├── LatencyHero.tsx  # Full-width latency comparison: Somnia vs Solana vs Ethereum (NEW)
+│   │   └── ActivityFeed.tsx # Horizontal scrolling feed bar; tx hashes link to Somnia explorer
 │   ├── chart/
 │   │   ├── CandlestickChart.tsx  # TradingView Lightweight Charts v5 (SSR-disabled)
 │   │   ├── OrderBook.tsx         # Bid/ask depth with proportional size bars
 │   │   └── RecentTrades.tsx      # Scrollable recent trades list with buyer/seller agent attribution
 │   └── agents/
-│       ├── AgentGrid.tsx         # 2-column grid container for 4 agent cards
-│       ├── AgentCard.tsx         # Stats + decision history + tx hash per agent
-│       ├── AgentScoreboard.tsx   # P&L leaderboard ranked by trade_pnl, shows volume + latency
+│       ├── AgentGrid.tsx         # 2-column grid container for 5 agent cards
+│       ├── AgentCard.tsx         # Strategy desc + stats (4 cols incl position) + decision history
+│       ├── AgentScoreboard.tsx   # P&L leaderboard ranked by total P&L (realized + unrealized)
 │       ├── ReasoningPanel.tsx    # Decision history (last 20 entries, fadeIn on newest)
 │       └── AgentStatusBadge.tsx  # THINKING / EXECUTING / IDLE badge with animations
 ├── store/
@@ -84,15 +85,17 @@ Key actions: `addCandle(candle)` (appends or updates last bar, caps at 200), `se
 
 ### `store/agentStore.ts`
 
-| State field          | Type                           | Description                                              |
-| -------------------- | ------------------------------ | -------------------------------------------------------- |
-| `agents`             | `Record<agent_id, AgentState>` | Full agent state from latest `chain_metrics`             |
-| `decisionHistory`    | `Record<agent_id, string[]>`   | Last 20 `"BUY @ $3245"` entries, derived from diffs      |
-| `coordinatorBalance` | `number`                       | STT remaining in coordinator                             |
-| `totalLocked`        | `number`                       | Total STT in treasury                                    |
-| `loopStoppedAny`     | `boolean`                      | True if any agent's loop has stopped                     |
-| `recentFills`        | `Fill[]`                       | Last 20 matched trades with buyer/seller agent IDs       |
-| `somniaBlockMs`      | `number`                       | Block time in ms (for latency display)                   |
+| State field          | Type                           | Description                                                    |
+| -------------------- | ------------------------------ | -------------------------------------------------------------- |
+| `agents`             | `Record<agent_id, AgentState>` | Full agent state from latest `chain_metrics` (5 agents)        |
+| `decisionHistory`    | `Record<agent_id, string[]>`   | Last 20 `"BUY @ $3245"` entries, derived from diffs            |
+| `coordinatorBalance` | `number`                       | STT remaining in coordinator                                   |
+| `totalLocked`        | `number`                       | Total STT in treasury                                          |
+| `loopStoppedAny`     | `boolean`                      | True if any agent's loop has stopped                           |
+| `recentFills`        | `Fill[]`                       | Last 20 matched trades with buyer/seller agent IDs + `tx_hash` |
+| `somniaBlockMs`      | `number`                       | Block time in ms (for latency display)                         |
+
+Per-agent `AgentState` also includes: `net_position` (float, positive = long), `unrealized_pnl` (mark-to-market), `wallet_address` (for explorer link fallback).
 
 `updateFromChainMetrics(metrics)` is the single update entry point — called on every `chain_metrics` WS message.
 
@@ -108,13 +111,13 @@ Key actions: `addCandle(candle)` (appends or updates last bar, caps at 200), `se
 
 Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. Sends keepalive ping every 30s.
 
-| `msg.type`        | Action                                                                                                                         |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `market_snapshot` | `marketStore.setMarketSnapshot(msg.data)`                                                                                      |
-| `candle`          | `marketStore.addCandle(msg.data)`                                                                                              |
-| `chain_metrics`   | `agentStore.updateFromChainMetrics(msg.data)` — also diffs per-agent `decisions_total` to push new decision entries to `feedStore` and `loop_stopped` transitions as warnings |
-| `risk_warning`    | `feedStore.addItem(...)` as `category: "warning"` — kept for forward-compat; not currently sent by backend                    |
-| `event_injected`  | `feedStore.addItem(...)` as `category: "event"`                                                                                |
+| `msg.type`        | Action                                                                                                                                                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `market_snapshot` | `marketStore.setMarketSnapshot(msg.data)`                                                                                                                                                                      |
+| `candle`          | `marketStore.addCandle(msg.data)`                                                                                                                                                                              |
+| `chain_metrics`   | `agentStore.updateFromChainMetrics(msg.data)` — also diffs per-agent `decisions_total` to push new entries to `feedStore` (including `tx_hash` from `recent_fills`) and `loop_stopped` transitions as warnings |
+| `risk_warning`    | `feedStore.addItem(...)` as `category: "warning"` — emitted by backend on spread > 2% (`HIGH_SPREAD`) or volatility spike > 2% (`VOLATILITY_SPIKE`)                                                            |
+| `event_injected`  | `feedStore.addItem(...)` as `category: "event"`                                                                                                                                                                |
 
 **Sending events:** `useWebSocket` exports `injectEvent(type)` which POSTs to `POST /events/inject`. Called by the Header buttons.
 
@@ -127,6 +130,15 @@ Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. S
 - Reads: `marketStore.currentPrice`, `marketStore.isConnected`, `marketStore.priceChange24h`, `marketStore.volume24h`
 - Uses: `useWebSocket().injectEvent`
 - 5 event buttons (WHALE BUY, WHALE SELL, VOL SPIKE, NEWS EVENT, FLASH CRASH) each with a 10s cooldown after click (shows "INJECTING..." and disables)
+
+### `LatencyHero.tsx`
+
+- Full-width panel rendered between `<Header />` and the main content grid in `page.tsx`
+- Reads: `agentStore.agents`, `agentStore.recentFills`, `agentStore.somniaBlockMs`
+- Computes `avgLatencyMs` = mean of `avg_decision_latency_ms` across agents with at least one recorded decision
+- Displays an animated latency number (emerald, tabular-nums) that restarts `animate-pulse` on each new fill via `key={fillKey}` remount trick
+- Three proportional comparison bars: Somnia (emerald, actual ms), Solana (~400 ms, fixed 3.3%), Ethereum (~12,000 ms, fixed 100%)
+- Shows last fill price and buyer vs seller agent names when fills are available
 
 ### `CandlestickChart.tsx`
 
@@ -152,20 +164,23 @@ Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. S
 ### `AgentGrid.tsx`
 
 - Reads: `agentStore.agents`
-- Fixed rendering order: `market_maker`, `momentum_trader`, `arbitrage_agent`, `risk_manager`
+- Fixed rendering order: `market_maker`, `momentum_trader`, `arbitrage_agent`, `risk_manager`, `noise_trader`
+- 5 agents render in a 2-column grid (2+2+1 layout on xl screens)
 
 ### `AgentCard.tsx`
 
 - Props: `agent: AgentState`
-- Per-agent color coding: market_maker=blue, momentum_trader=emerald, arbitrage_agent=violet, risk_manager=yellow
-- Stats: decisions total, BUY/SELL/HOLD counts, treasury balance, last decision + price
+- Per-agent color coding: market_maker=blue, momentum_trader=emerald, arbitrage_agent=violet, risk_manager=yellow, noise_trader=pink
+- Strategy description line rendered below agent name (e.g. "Posts bid AND ask simultaneously. Profits from the spread.")
+- Stats: decisions total, BUY/SELL/HOLD counts, treasury balance, **net position** (LONG/SHORT/FLAT badge)
+- Last decision + price shown in header
 - Contains `ReasoningPanel` and `AgentStatusBadge`
 
 ### `AgentScoreboard.tsx`
 
 - Reads: `agentStore.agents`
-- Ranks all 4 agents by `trade_pnl` (highest first) with medal emojis
-- Shows per-agent: P&L (colored green/red), buy volume, sell volume, avg decision latency (`avg_decision_latency_ms`) if non-zero
+- Ranks all 5 agents by `trade_pnl + unrealized_pnl` (highest first) with medal emojis (🥇🥈🥉4️⃣5️⃣)
+- Shows per-agent: realized P&L, unrealized P&L (shown when abs > 0.01), buy volume, sell volume, avg decision latency
 - Row background tints green (profitable) or red (losing) based on P&L threshold
 - Shows "waiting for first trades…" until any agent has fills
 
@@ -191,9 +206,9 @@ Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. S
   - `warning` → yellow
   - `event` → violet
   - `system` → gray
+- Items with `tx_hash` render the timestamp as a link to `https://shannon-explorer.somnia.network/tx/{tx_hash}` with an `ExternalLink` icon (configurable via `NEXT_PUBLIC_SOMNIA_EXPLORER`)
 
 ---
-
 
 ## TradingView v5 Notes
 
@@ -208,11 +223,11 @@ This project uses `lightweight-charts@5.x`. The v5 API broke compatibility with 
 
 ## Adding a New Agent
 
-1. **`store/agentStore.ts`**: Add entry to `AGENT_DEFAULTS`
-2. **`components/agents/AgentGrid.tsx`**: Add new `agent_id` to the ordered array
-3. **`components/agents/AgentCard.tsx`**: Add emoji to the icon map and color to the color map
-4. **`components/agents/AgentScoreboard.tsx`**: Add emoji to `AGENT_ICONS`
-5. **`lib/types.ts`**: Add new id to the `AgentState["agent_id"]` union type
+1. **`lib/types.ts`**: Add new id to the `AgentState["agent_id"]` union type
+2. **`store/agentStore.ts`**: Add `{ agent_id: 'new_id', agent_name: 'Display Name' }` to `AGENT_DEFAULTS`; `makeDefaultAgent` already initialises all new fields (net_position, unrealized_pnl, wallet_address)
+3. **`components/agents/AgentGrid.tsx`**: Add new `agent_id` to the ordered array (grid is xl:grid-cols-2 so odd counts are fine)
+4. **`components/agents/AgentCard.tsx`**: Add emoji to `AGENT_ICONS`, color class to `AGENT_COLORS`, hover glow to `AGENT_GLOW`, and strategy description to `AGENT_STRATEGIES`
+5. **`components/agents/AgentScoreboard.tsx`**: Add emoji to `AGENT_ICONS`, extend `MEDALS` array
 6. Backend: add to `AGENT_CONFIGS` in `orchestrator.py` + `config.py` + `.env` + `deploy.js` (`setSystemPrompt`)
 
 ---

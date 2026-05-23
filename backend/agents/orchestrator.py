@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import math
+import random
 import time
 from pathlib import Path
 from typing import Optional
@@ -29,6 +31,7 @@ AGENT_CONFIGS = [
     {"id": "momentum_trader",  "name": "Momentum-Alpha", "pk_key": "momentum_trader_pk"},
     {"id": "arbitrage_agent",  "name": "Arb-Scanner",    "pk_key": "arbitrage_agent_pk"},
     {"id": "risk_manager",     "name": "Risk-Shield",    "pk_key": "risk_manager_pk"},
+    {"id": "noise_trader",     "name": "Noise-Bot",      "pk_key": "noise_trader_pk"},
 ]
 
 
@@ -54,6 +57,7 @@ def _load_local_deployment():
             "momentum_trader": "momentum_trader_pk",
             "arbitrage_agent": "arbitrage_agent_pk",
             "risk_manager":    "risk_manager_pk",
+            "noise_trader":    "noise_trader_pk",
         }
         for agent_id, pk_key in pk_map.items():
             pk = agents_data.get(agent_id, {}).get("pk", "")
@@ -87,6 +91,9 @@ class AgentOrchestrator:
                     settings.agent_coordinator_address, settings.somnia_rpc_url
                 )
 
+        # Must be initialized before the agents loop so wallet_address can be propagated
+        self._chain_metrics: dict = self._build_initial_chain_metrics()
+
         # Lightweight agent registry — wallet addresses needed for metrics + treasury polling
         self.agents: dict[str, dict] = {}
         for cfg in AGENT_CONFIGS:
@@ -101,6 +108,9 @@ class AgentOrchestrator:
                 "agent_name":     cfg["name"],
                 "wallet_address": wallet,
             }
+            # Propagate wallet_address into chain_metrics initial state
+            if cfg["id"] in self._chain_metrics.get("agents", {}):
+                self._chain_metrics["agents"][cfg["id"]]["wallet_address"] = wallet
 
         # Address → agent_id mapping — built once, shared by both polling loops
         self._wallet_to_id: dict[str, str] = {
@@ -108,11 +118,14 @@ class AgentOrchestrator:
         }
         # Tracks the block at which each agent's last DecisionTriggered event fired
         self._decision_trigger_blocks: dict[str, int] = {}
+        # Tracks wall-clock time of last observed DecisionTriggered per agent (for watchdog)
+        self._watchdog_last_seen: dict[str, float] = {}
 
         self._poll_task: Optional[asyncio.Task] = None
         self._snapshot_task: Optional[asyncio.Task] = None
         self._metrics_task: Optional[asyncio.Task] = None
-        self._chain_metrics: dict = self._build_initial_chain_metrics()
+        self._noise_task: Optional[asyncio.Task] = None
+        self._watchdog_task: Optional[asyncio.Task] = None
 
     def _build_initial_chain_metrics(self) -> dict:
         return {
@@ -146,6 +159,9 @@ class AgentOrchestrator:
                     "total_sell_volume":        0.0,
                     "avg_decision_latency_ms":  0.0,
                     "decision_latency_count":   0,
+                    "net_position":             0.0,
+                    "unrealized_pnl":           0.0,
+                    "wallet_address":           "",
                 }
                 for cfg in AGENT_CONFIGS
             },
@@ -159,9 +175,15 @@ class AgentOrchestrator:
         self._snapshot_task = asyncio.create_task(self._snapshot_broadcast_loop())
         self._metrics_task  = asyncio.create_task(self._contract_metrics_poll_loop())
 
+        if self._exchange:
+            self._noise_task = asyncio.create_task(self._noise_trader_loop())
+
         if self._coordinator:
             logger.info("Firing initial on-chain triggers (contract self-loops after this)...")
+            _on_chain_agents = {"market_maker", "momentum_trader", "arbitrage_agent", "risk_manager"}
             for cfg in AGENT_CONFIGS:
+                if cfg["id"] not in _on_chain_agents:
+                    continue  # noise_trader uses Python loop only
                 pk = getattr(settings, cfg["pk_key"])
                 try:
                     result = await self._coordinator.trigger_decision(
@@ -169,16 +191,18 @@ class AgentOrchestrator:
                         agent_id=cfg["id"],
                     )
                     logger.info(f"  {cfg['id']} initial trigger: {result.get('tx_hash')}")
+                    self._watchdog_last_seen[cfg["id"]] = time.time()
                 except Exception as e:
-                    logger.error(f"  {cfg['id']} initial trigger failed: {e}")
-                await asyncio.sleep(1.0)
+                    logger.error(f"  {cfg['id']} initial trigger FAILED: {e}")
+                await asyncio.sleep(2.0)  # extra breathing room for the daemon
+            self._watchdog_task = asyncio.create_task(self._agent_watchdog_loop())
         else:
             logger.info("No AgentCoordinator configured — running in observe-only mode.")
 
         logger.info("All loops started.")
 
     async def stop_all(self):
-        for task in [self._poll_task, self._snapshot_task, self._metrics_task]:
+        for task in [self._poll_task, self._snapshot_task, self._metrics_task, self._noise_task, self._watchdog_task]:
             if task:
                 task.cancel()
 
@@ -250,24 +274,29 @@ class AgentOrchestrator:
             await asyncio.sleep(1.0)
 
     def _record_pnl_from_trade(self, event: dict, buyer_id: Optional[str], seller_id: Optional[str]):
-        """Update per-agent P&L and recent_fills from a TradeExecuted event."""
-        trade_value = event["price"] * event["amount"]
+        """Update per-agent P&L, net position, and recent_fills from a TradeExecuted event."""
+        price = event["price"]
+        amount = event["amount"]
+        trade_value = price * amount
         metrics = self._chain_metrics
 
         if buyer_id and buyer_id in metrics["agents"]:
             metrics["agents"][buyer_id]["trade_pnl"]       -= trade_value
             metrics["agents"][buyer_id]["total_buy_volume"] += trade_value
+            metrics["agents"][buyer_id]["net_position"]    += amount
 
         if seller_id and seller_id in metrics["agents"]:
             metrics["agents"][seller_id]["trade_pnl"]        += trade_value
             metrics["agents"][seller_id]["total_sell_volume"] += trade_value
+            metrics["agents"][seller_id]["net_position"]     -= amount
 
         metrics["recent_fills"].insert(0, {
-            "price":        round(event["price"], 4),
-            "amount":       round(event["amount"], 4),
+            "price":        round(price, 4),
+            "amount":       round(amount, 4),
             "buyer_agent":  buyer_id or "external",
             "seller_agent": seller_id or "external",
             "block":        event["block"],
+            "tx_hash":      event.get("tx_hash", ""),
         })
         metrics["recent_fills"] = metrics["recent_fills"][:20]
 
@@ -319,7 +348,9 @@ class AgentOrchestrator:
                 agent = metrics["agents"].get(ev.get("agentId"))
 
                 if ev["event"] == "DecisionTriggered" and agent:
-                    self._decision_trigger_blocks[ev.get("agentId", "")] = ev["block"]
+                    agent_id_str = ev.get("agentId", "")
+                    self._decision_trigger_blocks[agent_id_str] = ev["block"]
+                    self._watchdog_last_seen[agent_id_str] = time.time()
 
                 elif ev["event"] == "DecisionExecuted" and agent:
                     decision = ev.get("decision", "")
@@ -374,6 +405,50 @@ class AgentOrchestrator:
             real_book = await self._exchange.get_order_book(10)
             self._state_bus.set_order_book(real_book["bids"], real_book["asks"])
 
+            # Mark-to-market unrealized P&L for all agents
+            current_price = await self._exchange.get_last_trade_price()
+            if current_price == 0.0:
+                current_price = self._price_tracker.price
+            if current_price > 0:
+                for agent_data in metrics["agents"].values():
+                    net_pos = agent_data["net_position"]
+                    agent_data["unrealized_pnl"] = round(net_pos * current_price, 4)
+
+            # Risk warnings — emitted when market conditions are abnormal
+            spread_pct = metrics["spread_pct"]
+            if spread_pct > 2.0:
+                await self._hub.broadcast({
+                    "type": "risk_warning",
+                    "data": {
+                        "from_agent": "risk_manager",
+                        "severity": "HIGH" if spread_pct > 5.0 else "MEDIUM",
+                        "warning_type": "HIGH_SPREAD",
+                        "message": f"Spread at {spread_pct:.2f}% — liquidity critically low",
+                        "timestamp": time.time(),
+                    },
+                })
+
+            closes = self._price_tracker.get_recent_closes(10)
+            if len(closes) >= 5:
+                returns = [
+                    math.log(closes[i] / closes[i - 1])
+                    for i in range(1, len(closes))
+                    if closes[i - 1] > 0
+                ]
+                if returns:
+                    vol = (sum(r ** 2 for r in returns) / len(returns)) ** 0.5 * 100
+                    if vol > 2.0:
+                        await self._hub.broadcast({
+                            "type": "risk_warning",
+                            "data": {
+                                "from_agent": "risk_manager",
+                                "severity": "HIGH" if vol > 5.0 else "MEDIUM",
+                                "warning_type": "VOLATILITY_SPIKE",
+                                "message": f"Volatility spike: {vol:.2f}% stddev over last 10 bars",
+                                "timestamp": time.time(),
+                            },
+                        })
+
             for ev in await self._exchange.get_order_placed_events(from_block):
                 max_block = max(max_block, ev["block"])
                 agent_id = wallet_to_id.get(ev["agent"].lower())
@@ -387,6 +462,12 @@ class AgentOrchestrator:
                 balance = await self._treasury.get_balance(agent["wallet_address"])
                 metrics["agents"][agent["agent_id"]]["treasury_balance"] = balance
 
+        # Ensure wallet_address is always current in metrics (supports explorer links)
+        for agent in self.agents.values():
+            agent_id = agent["agent_id"]
+            if agent_id in metrics["agents"]:
+                metrics["agents"][agent_id]["wallet_address"] = agent["wallet_address"]
+
         await self._hub.broadcast({
             "type": "chain_metrics",
             "data": metrics,
@@ -394,6 +475,53 @@ class AgentOrchestrator:
         })
 
         return max_block + 1 if max_block > from_block else from_block
+
+    async def _noise_trader_loop(self):
+        """Places random orders every 4-6 seconds to keep the book alive."""
+        noise_pk = getattr(settings, "noise_trader_pk", "")
+        logger.info("Noise trader loop started")
+        while True:
+            try:
+                ref_price = self._price_tracker.price
+                if ref_price > 0 and self._exchange:
+                    is_buy = random.choice([True, False])
+                    slippage = random.uniform(-0.005, 0.005)
+                    price = ref_price * (1 + slippage)
+                    amount = round(random.uniform(0.03, 0.08), 3)
+                    result = await self._exchange.place_order(noise_pk, is_buy, price, amount)
+                    side = "BUY" if is_buy else "SELL"
+                    logger.debug(f"Noise trader: {side} {amount} @ ${price:.2f} tx={result.get('tx_hash', '')[:12]}")
+            except Exception as e:
+                logger.debug(f"Noise trader order failed: {e}")
+            await asyncio.sleep(random.uniform(4.0, 6.0))
+
+    async def _agent_watchdog_loop(self):
+        """Re-triggers any on-chain agent whose loop has stalled (no DecisionTriggered in 45 s)."""
+        _on_chain_agents = {"market_maker", "momentum_trader", "arbitrage_agent", "risk_manager"}
+        STALL_SECONDS = 45.0
+        await asyncio.sleep(30.0)  # grace period for first cycle to complete
+        while True:
+            if self._coordinator:
+                now = time.time()
+                for cfg in AGENT_CONFIGS:
+                    if cfg["id"] not in _on_chain_agents:
+                        continue
+                    agent_id = cfg["id"]
+                    agent_data = self._chain_metrics.get("agents", {}).get(agent_id, {})
+                    if agent_data.get("loop_stopped"):
+                        continue
+                    last_seen = self._watchdog_last_seen.get(agent_id, 0.0)
+                    if now - last_seen > STALL_SECONDS:
+                        logger.warning(f"[watchdog] {agent_id} stalled ({now - last_seen:.0f}s) — re-triggering")
+                        pk = getattr(settings, cfg["pk_key"])
+                        try:
+                            result = await self._coordinator.trigger_decision(agent_pk=pk, agent_id=agent_id)
+                            logger.info(f"[watchdog] {agent_id} retrigger tx={result.get('tx_hash', '')[:16]}")
+                            self._watchdog_last_seen[agent_id] = now
+                        except Exception as e:
+                            logger.error(f"[watchdog] {agent_id} retrigger failed: {e}")
+                        await asyncio.sleep(2.0)
+            await asyncio.sleep(15.0)
 
     def get_agent_states(self) -> dict:
         return self._chain_metrics.get("agents", {})

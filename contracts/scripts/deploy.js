@@ -57,7 +57,7 @@ async function main() {
   console.log('AgentCoordinator deployed to:', coordinatorAddr);
 
   // Set per-agent API configs on-chain (price data source for each agent)
-  const agentIds = ['market_maker', 'momentum_trader', 'arbitrage_agent', 'risk_manager'];
+  const agentIds = ['market_maker', 'momentum_trader', 'arbitrage_agent', 'risk_manager', 'noise_trader'];
   for (const id of agentIds) {
     const tx = await coordinator.setAgentConfig(id, COINGECKO_ETH_URL, COINGECKO_SELECTOR, PRICE_DECIMALS);
     await tx.wait();
@@ -107,6 +107,14 @@ async function main() {
         'BUY if there is no best bid, or if the on-chain last trade price is more than $5 below ETH reference (support the market). ' +
         'SELL if there is no best ask, or if the on-chain last trade price is more than $5 above ETH reference (resist the spike). ' +
         'If both conditions are neutral, BUY if last trade is below reference, SELL if above. ' +
+        'Respond with exactly one word: BUY or SELL.',
+    },
+    {
+      id: 'noise_trader',
+      text:
+        'You are Noise-Bot, a random noise trading agent on the Somnia blockchain. ' +
+        'Your goal is to keep the market active with unpredictable orders. ' +
+        'If the ETH reference price ends in an even digit, BUY. If odd, SELL. ' +
         'Respond with exactly one word: BUY or SELL.',
     },
   ];
