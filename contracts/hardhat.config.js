@@ -1,4 +1,6 @@
 import '@nomicfoundation/hardhat-ethers';
+import '@nomicfoundation/hardhat-chai-matchers';
+import '@nomicfoundation/hardhat-network-helpers';
 import { config as dotenvConfig } from 'dotenv';
 dotenvConfig();
 

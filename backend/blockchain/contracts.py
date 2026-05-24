@@ -51,6 +51,7 @@ def _load_abis():
     ]
     _ABIS["AgentCoordinator"] = [
         {"inputs": [{"name": "agentId", "type": "string"}], "name": "triggerAgentDecision", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}, {"name": "rawPrice", "type": "uint256"}], "name": "triggerWithPrice", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
         {"inputs": [], "name": "getBalance", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "requestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}], "name": "DecisionTriggered", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "llmRequestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}, {"indexed": False, "name": "fetchedPrice", "type": "uint256"}], "name": "LLMRequestFired", "type": "event"},
@@ -304,6 +305,18 @@ class AgentCoordinatorContract:
             agent_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url
         )
         return {"tx_hash": tx_hash, "agent_id": agent_id}
+
+    async def trigger_with_price(self, agent_pk: str, agent_id: str, price: int) -> dict:
+        """
+        Calls AgentCoordinator.triggerWithPrice(agentId, rawPrice).
+        Backend supplies a live ETH/USD price (whole USD integer), skipping the
+        Somnia JSON API agent step. Requires the deployer (owner) private key.
+        """
+        data = self._contract.encode_abi("triggerWithPrice", args=[agent_id, price])
+        tx_hash = await send_transaction(
+            agent_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url
+        )
+        return {"tx_hash": tx_hash, "agent_id": agent_id, "price": price}
 
     async def get_balance(self) -> float:
         loop = asyncio.get_running_loop()
