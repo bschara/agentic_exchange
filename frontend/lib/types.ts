@@ -49,6 +49,8 @@ export interface AgentState {
   last_decision: 'BUY' | 'SELL' | 'HOLD' | null;
   last_price: number;
   last_fetched_price: number;
+  last_context: string;       // full LLM prompt from last LLMRequestFired event
+  win_streak: number;         // consecutive filled-order streak
   loop_stopped: boolean;
   loop_stopped_reason: string | null;
   last_order_id: number | null;
@@ -62,6 +64,15 @@ export interface AgentState {
   wallet_address: string;
 }
 
+export interface CoalitionAlert {
+  direction: string;
+  agent_count: number;
+  price: number;
+  order_id: number;
+  block: number;
+  timestamp: number;
+}
+
 export interface ChainMetrics {
   coordinator_balance: number;
   total_locked: number;
@@ -71,6 +82,7 @@ export interface ChainMetrics {
   loop_stopped_any: boolean;
   agents: Record<string, AgentState>;
   recent_fills: Fill[];
+  coalition_alert: CoalitionAlert | null;
   somnia_block_ms: number;
   last_update: number;
 }
@@ -91,7 +103,7 @@ export interface ActivityFeedItem {
   agent_id: string;
   agent_name: string;
   message: string;
-  category: 'order' | 'trade' | 'warning' | 'event' | 'system';
+  category: 'order' | 'trade' | 'warning' | 'event' | 'system' | 'coalition';
   timestamp: number;
   tx_hash?: string;
 }
@@ -120,4 +132,5 @@ export type WSMessage =
   | { type: 'chain_metrics'; data: ChainMetrics; timestamp: number }
   | { type: 'risk_warning'; data: RiskWarning }
   | { type: 'event_injected'; data: EventInjected }
+  | { type: 'coalition_alert'; data: CoalitionAlert; timestamp: number }
   | { type: 'pong' };

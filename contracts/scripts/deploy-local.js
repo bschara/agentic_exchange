@@ -20,18 +20,18 @@ const HARDHAT_PKS = [
   '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d', // Account #1 market_maker
   '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a', // Account #2 momentum_trader
   '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6', // Account #3 arbitrage_agent
-  '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926b', // Account #4 risk_manager
-  '0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e', // Account #5 noise_trader
+  '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a', // Account #4 risk_manager → 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65
+  '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba', // Account #5 noise_trader → 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc
 ];
 
 const AGENT_IDS = ['market_maker', 'momentum_trader', 'arbitrage_agent', 'risk_manager', 'noise_trader'];
 
 const AGENT_META = {
-  market_maker:    { name: 'MM-Prime',       strategy: 'Market Making' },
-  momentum_trader: { name: 'Momentum-Alpha', strategy: 'Momentum Trading' },
-  arbitrage_agent: { name: 'Arb-Scanner',    strategy: 'Arbitrage' },
-  risk_manager:    { name: 'Risk-Shield',    strategy: 'Risk Management' },
-  noise_trader:    { name: 'Noise-Bot',      strategy: 'Random Noise' },
+  market_maker:    { name: 'MM-Prime',       strategy: 'market_maker' },
+  momentum_trader: { name: 'Momentum-Alpha', strategy: 'momentum_trader' },
+  arbitrage_agent: { name: 'Arb-Scanner',    strategy: 'arbitrage_agent' },
+  risk_manager:    { name: 'Risk-Shield',    strategy: 'risk_manager' },
+  noise_trader:    { name: 'Noise-Bot',      strategy: 'noise_trader' },
 };
 
 const PROMPTS = {
@@ -86,28 +86,35 @@ async function main() {
   const mockPlatformAddr = await mockPlatform.getAddress();
   console.log('MockPlatform:      ', mockPlatformAddr);
 
-  // 2. Exchange
+  // 2. AgentToken (mintable ERC20 for on-chain P&L settlement)
+  const AgentToken = await hre.ethers.getContractFactory('AgentToken');
+  const token = await AgentToken.deploy('AgentToken', 'AGT');
+  await token.waitForDeployment();
+  const tokenAddr = await token.getAddress();
+  console.log('AgentToken:        ', tokenAddr);
+
+  // 3. Exchange — requires AgentToken address (locks AGT on SELL)
   const Exchange = await hre.ethers.getContractFactory('Exchange');
-  const exchange = await Exchange.deploy();
+  const exchange = await Exchange.deploy(tokenAddr);
   await exchange.waitForDeployment();
   const exchangeAddr = await exchange.getAddress();
   console.log('Exchange:          ', exchangeAddr);
 
-  // 3. AgentRegistry
+  // 4. AgentRegistry
   const AgentRegistry = await hre.ethers.getContractFactory('AgentRegistry');
   const registry = await AgentRegistry.deploy();
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
   console.log('AgentRegistry:     ', registryAddr);
 
-  // 4. Treasury
+  // 5. Treasury
   const Treasury = await hre.ethers.getContractFactory('Treasury');
   const treasury = await Treasury.deploy();
   await treasury.waitForDeployment();
   const treasuryAddr = await treasury.getAddress();
   console.log('Treasury:          ', treasuryAddr);
 
-  // 5. AgentCoordinator — pass MockPlatform as the IAgentRequester
+  // 6. AgentCoordinator — pass MockPlatform as the IAgentRequester
   const AgentCoordinator = await hre.ethers.getContractFactory('AgentCoordinator');
   const coordinator = await AgentCoordinator.deploy(
     mockPlatformAddr,
@@ -118,6 +125,13 @@ async function main() {
   await coordinator.waitForDeployment();
   const coordinatorAddr = await coordinator.getAddress();
   console.log('AgentCoordinator:  ', coordinatorAddr);
+
+  // Mint AGT to coordinator (pool for all agents) + approve Exchange
+  const COORDINATOR_MINT = hre.ethers.parseEther('10000000');
+  await (await token.mint(coordinatorAddr, COORDINATOR_MINT)).wait();
+  console.log('Minted 10M AGT to AgentCoordinator');
+  await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log('AgentCoordinator approved Exchange for AGT (MaxUint256)');
 
   // Set agent configs + prompts
   console.log('\n─── Configuring agents ────────────────────────────────────');
@@ -150,8 +164,16 @@ async function main() {
     console.log(`  ${id}: ${signer.address} registered + 0.1 ETH in treasury`);
   }
 
+  // Mint AGT to noise trader + approve Exchange so it can place SELL orders directly
+  const noiseSigner = agentSigners[4]; // noise_trader is account #5
+  const NOISE_AGT = hre.ethers.parseEther('10000');
+  await (await token.mint(noiseSigner.address, NOISE_AGT)).wait();
+  await (await token.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log(`\nNoise trader funded: 10,000 AGT + Exchange approved (${noiseSigner.address})`);
+
   // Read ABIs
   const mockArtifact  = await hre.artifacts.readArtifact('MockPlatform');
+  const tokenArtifact = await hre.artifacts.readArtifact('AgentToken');
   const exchArtifact  = await hre.artifacts.readArtifact('Exchange');
   const regArtifact   = await hre.artifacts.readArtifact('AgentRegistry');
   const trsArtifact   = await hre.artifacts.readArtifact('Treasury');
@@ -164,6 +186,7 @@ async function main() {
     deployer: deployer.address,
     contracts: {
       MockPlatform:     { address: mockPlatformAddr },
+      AgentToken:       { address: tokenAddr },
       Exchange:         { address: exchangeAddr },
       AgentRegistry:    { address: registryAddr },
       Treasury:         { address: treasuryAddr },
@@ -171,6 +194,7 @@ async function main() {
     },
     abis: {
       MockPlatform:     mockArtifact.abi,
+      AgentToken:       tokenArtifact.abi,
       Exchange:         exchArtifact.abi,
       AgentRegistry:    regArtifact.abi,
       Treasury:         trsArtifact.abi,
@@ -194,6 +218,7 @@ async function main() {
   console.log('\n═══ Paste into backend/.env ════════════════════════════════');
   console.log('SOMNIA_RPC_URL=http://127.0.0.1:8545');
   console.log('SOMNIA_CHAIN_ID=31337');
+  console.log(`AGENT_TOKEN_ADDRESS=${tokenAddr}`);
   console.log(`EXCHANGE_ADDRESS=${exchangeAddr}`);
   console.log(`AGENT_REGISTRY_ADDRESS=${registryAddr}`);
   console.log(`TREASURY_ADDRESS=${treasuryAddr}`);

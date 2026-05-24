@@ -13,6 +13,7 @@ const CATEGORY_COLORS: Record<ActivityFeedItem['category'], string> = {
   warning: 'text-yellow-400',
   event: 'text-violet-400',
   system: 'text-gray-400',
+  coalition: 'text-orange-400',
 };
 
 const CATEGORY_BG: Record<ActivityFeedItem['category'], string> = {
@@ -21,6 +22,7 @@ const CATEGORY_BG: Record<ActivityFeedItem['category'], string> = {
   warning: 'bg-yellow-500/10',
   event: 'bg-violet-500/10',
   system: 'bg-gray-500/10',
+  coalition: 'bg-orange-500/20 border border-orange-500/40',
 };
 
 function timeAgo(ts: number): string {

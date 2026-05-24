@@ -74,6 +74,20 @@ async def debug_config():
     }
 
 
+@router.get("/agents/registry")
+async def get_registry():
+    """On-chain agent discovery — returns all registered agents from AgentRegistry."""
+    if not _orchestrator or not _orchestrator._registry:
+        return {"agents": [], "error": "AgentRegistry not initialized"}
+    addresses = await _orchestrator._registry.get_all_agents()
+    agents = []
+    for addr in addresses:
+        info = await _orchestrator._registry.get_agent(addr)
+        if info:
+            agents.append(info)
+    return {"agents": agents, "count": len(agents)}
+
+
 @router.post("/agents/trigger")
 async def trigger_all_agents():
     """Manually fire triggerAgentDecision for all 4 agents. Use this if startup triggers were missed."""

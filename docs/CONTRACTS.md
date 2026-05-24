@@ -1,6 +1,6 @@
 # Contracts — Agentic Exchange
 
-Four Solidity contracts on Somnia testnet (chain 50312). Exchange.sol is a real on-chain limit order book with automatic matching. AgentCoordinator.sol routes 4 agents through Somnia's native LLM inference agent for on-chain validator consensus — with cancel-before-place and Market Maker dual-sided quoting built in. A 5th agent (noise_trader) places orders directly from Python without the coordinator.
+Five Solidity contracts on Somnia testnet (chain 50312). `AgentToken.sol` is a mintable ERC20 (AGT) used for real on-chain settlement — SELL orders lock tokens in Exchange escrow, matched fills release them to the buyer, cancels refund the seller. `Exchange.sol` is a real on-chain limit order book with automatic matching and AGT settlement. `AgentCoordinator.sol` routes 4 agents through Somnia's native LLM inference agent for on-chain validator consensus — with peer signal injection, adaptive order sizing via win streaks, coalition orders when 3 agents agree, cancel-before-place, and Market Maker dual-sided quoting all built in. A 5th agent (noise_trader) places orders directly from Python without the coordinator.
 
 ---
 
@@ -12,8 +12,9 @@ contracts/
 ├── package.json             # type: "module" (ESM), hardhat + ethers v6 deps
 ├── .env                     # Private keys — NOT committed (see .gitignore)
 ├── contracts/
-│   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
-│   ├── AgentCoordinator.sol # IAgentRequester integration — Somnia LLM for all 4 agents
+│   ├── AgentToken.sol       # Mintable ERC20 (AGT): owner-mint, no OZ dependency
+│   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted + AGT settlement
+│   ├── AgentCoordinator.sol # IAgentRequester integration — Somnia LLM for all 4 agents + approveToken()
 │   ├── AgentRegistry.sol    # Agent registration, reputation, trade count
 │   ├── Treasury.sol         # Per-agent ETH balances (deposit / withdraw / allocate)
 │   └── MockPlatform.sol     # Local dev: simulates Somnia IAgentRequester callbacks
@@ -99,18 +100,21 @@ Output:
 
 ```
 Deploying contracts with: 0xAbCd...
+AgentToken deployed to:        0x0000...
 Exchange deployed to:          0x1111...
 AgentRegistry deployed to:     0x2222...
 Treasury deployed to:          0x3333...
 AgentCoordinator deployed to:  0x4444...
+API config set on-chain for market_maker
+...
 System prompt set on-chain for market_maker
-System prompt set on-chain for momentum_trader
-System prompt set on-chain for arbitrage_agent
-System prompt set on-chain for risk_manager
-System prompt set on-chain for noise_trader
+...
 AgentCoordinator funded with 0.2 STT
+Minted 10M AGT to AgentCoordinator
+AgentCoordinator approved Exchange for AGT
 
 ─── Add to backend/.env ───────────────────────────
+AGENT_TOKEN_ADDRESS=0x0000...
 EXCHANGE_ADDRESS=0x1111...
 AGENT_REGISTRY_ADDRESS=0x2222...
 TREASURY_ADDRESS=0x3333...
@@ -124,7 +128,7 @@ AGENT_COORDINATOR_ADDRESS=0x4444...
 npx hardhat run scripts/seed.js --network somnia
 ```
 
-Registers all 5 agents in `AgentRegistry` and deposits 0.1 STT per agent into `Treasury`. The noise_trader wallet is registered but its orders are placed directly (not via coordinator), so it doesn't consume STT from the coordinator balance.
+For each of the 5 agent wallets: registers in `AgentRegistry`, deposits 0.1 STT into `Treasury`, sends 0.05 STT gas from deployer if the wallet has < 0.01 STT, mints 1M AGT, and approves Exchange with a max allowance. The coordinator's AGT pool (10M) was already set up by `deploy.js`. The noise_trader wallet is registered and gets its own AGT allocation because it calls Exchange directly — not via the coordinator.
 
 ### 7. Verify deployment
 
@@ -142,9 +146,45 @@ Copy the printed env vars into `backend/.env`, then restart the backend with `./
 
 ## Contract Reference
 
+### `AgentToken.sol`
+
+Minimal owner-mintable ERC20 token (symbol `AGT`, name `AgentToken`). No OpenZeppelin dependency — fully self-contained. Used by `Exchange.sol` for real on-chain trade settlement.
+
+**Functions:**
+| Function | Access | Description |
+|----------|--------|-------------|
+| `mint(address to, uint256 amount)` | owner only | Mints AGT to any address; unlimited supply |
+| `transfer(address to, uint256 amount)` | anyone | Standard ERC20 transfer |
+| `approve(address spender, uint256 amount)` | anyone | Standard ERC20 approve |
+| `transferFrom(address from, address to, uint256 amount)` | anyone | Standard ERC20 transferFrom; skips allowance decrement for `type(uint256).max` |
+
+State variables: `name`, `symbol`, `decimals` (18, constant), `owner`, `totalSupply`, `balanceOf`, `allowance`.
+
+**Events:**
+
+```solidity
+event Transfer(address indexed from, address indexed to, uint256 value);
+event Approval(address indexed owner, address indexed spender, uint256 value);
+```
+
+**Token allocation at deploy time:**
+
+- `deploy.js` mints **10 million AGT** to the `AgentCoordinator` (shared pool for the 4 on-chain agents) and calls `coordinator.approveToken()` to grant Exchange a max allowance
+- `seed.js` mints **1 million AGT** to each of the 5 individual agent wallets and approves Exchange (needed for noise_trader which calls Exchange directly)
+
+---
+
 ### `Exchange.sol`
 
-Real on-chain limit order book with automatic matching. Every `placeOrder()` call triggers `_matchOrder()` immediately — orders cross if a matching price exists.
+Real on-chain limit order book with automatic matching and AGT token settlement. Every `placeOrder()` call triggers `_matchOrder()` immediately — orders cross if a matching price exists. Tokens are locked on SELL placement, released to the buyer on fill, and refunded to the seller on cancel.
+
+**Token flow:**
+
+- `placeOrder(false, ...)` (SELL) → `token.transferFrom(msg.sender, address(this), amount)` — locks AGT in Exchange escrow
+- `_recordTrade()` → `token.transfer(buyer, fill)` — releases AGT to buyer for each matched fill
+- `cancelOrder()` on a SELL → `token.transfer(order.agent, remaining)` — refunds unfilled AGT to seller
+
+Constructor: `constructor(address _token)` — Exchange is deployed with the AgentToken address.
 
 **Structs:**
 
@@ -175,8 +215,8 @@ struct Trade {
 **Functions:**
 | Function | Access | Description |
 |----------|--------|-------------|
-| `placeOrder(bool isBuy, uint256 price, uint256 amount)` | anyone | Creates order, runs `_matchOrder()`, returns `orderId`. Resting unmatched amount stays in book. |
-| `cancelOrder(uint256 orderId)` | order creator | Marks order inactive, removes from active book |
+| `placeOrder(bool isBuy, uint256 price, uint256 amount)` | anyone | Creates order, locks AGT for SELL orders via `transferFrom`, runs `_matchOrder()`, returns `orderId`. Resting unmatched amount stays in book. |
+| `cancelOrder(uint256 orderId)` | order creator | Refunds unfilled AGT to seller (SELL orders only), marks order inactive, removes from active book |
 | `getBestBid()` | view | Returns `(price, exists)` — highest active buy order price |
 | `getBestAsk()` | view | Returns `(price, exists)` — lowest active sell order price |
 | `getLastTradePrice()` | view | Price of the most recently matched fill (`0` if no fills yet) |
@@ -187,7 +227,7 @@ struct Trade {
 | `getActiveSells()` | view | Returns active sell order IDs |
 | `getOrdersByAgent(address agent)` | view | Returns active order IDs for a specific agent wallet (filters `_agentOrderIds[agent]`) |
 
-State variables: `lastTradePrice` (public), `hasTraded` (public bool — true after first match).
+State variables: `token` (public `IERC20`), `lastTradePrice` (public), `hasTraded` (public bool — true after first match).
 
 **Events:**
 
@@ -205,7 +245,15 @@ event TradeExecuted(uint256 indexed tradeId, uint256 buyOrderId, uint256 sellOrd
 
 ### `AgentCoordinator.sol`
 
-Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-triggers after every decision cycle — Python fires one `triggerAgentDecision()` per agent at startup; after that the loop runs entirely on-chain.
+Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-triggers after every decision cycle — Python fires one `triggerAgentDecision()` per agent at startup; after that the loop runs entirely on-chain. Three features enable genuine multi-agent coordination: peer signals in every LLM prompt, adaptive order sizing via win streaks, and coalition orders when 3 agents converge.
+
+**Constants:**
+
+| Constant            | Value      | Description                                                 |
+| ------------------- | ---------- | ----------------------------------------------------------- |
+| `ORDER_AMOUNT_BASE` | `0.001e18` | Base order size (1×); scales up with win streak             |
+| `ORDER_AMOUNT_MAX`  | `0.005e18` | Cap at 5× base regardless of streak                         |
+| `PRICE_OFFSET_BPS`  | `10`       | 0.1% — BUY price is +0.1%, SELL price is −0.1% vs reference |
 
 **Key state:**
 
@@ -213,7 +261,10 @@ Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-trigg
 - `agentConfigs` — `mapping(string => AgentConfig)` — per-agent price URL, JSON selector, and decimal precision
 - `pendingPriceRequests` — maps `requestId` → `PriceRequest { agentId, exists }` (stage 1 in-flight)
 - `pendingLLMRequests` — maps `requestId` → `LLMRequest { agentId, fetchedPrice, exists }` (stage 2 in-flight)
-- `lastOrderId` — `mapping(string => uint256)` keyed by agent ID; most recent order placed per agent, used for cancel-before-place
+- `lastOrderId` — `mapping(string => uint256)` — most recent order per agent, used for cancel-before-place
+- `lastDecision` — `mapping(string => string)` — last BUY/SELL/HOLD per agent; read by peers in `_buildPeerSignals()`
+- `winStreak` — `mapping(string => uint256)` — consecutive filled-order count; drives `_orderAmount()`
+- `_agentIdList` — `string[]` (private) — ordered list of registered agent IDs; iterated by `_buildPeerSignals()` and `_coalitionCount()`
 - `llmAgentId` — Somnia platform LLM agent ID (default `2`)
 - `jsonApiAgentId` — Somnia platform JSON API agent ID
 - `platform` — `IAgentRequester` at `0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776`
@@ -222,14 +273,21 @@ Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-trigg
 **Functions:**
 | Function | Access | Description |
 |----------|--------|-------------|
-| `triggerAgentDecision(string agentId)` | anyone | **Step 1.** Fires JSON API price fetch via `platform.createRequest`. Called once per agent at startup by the Python orchestrator; after that `_retrigger()` calls it on-chain. |
-| `handlePriceData(requestId, responses, status, ...)` | platform only | **Step 2 callback.** Decodes fetched price, reads Exchange on-chain state, builds context string, fires LLM inference via `platform.createRequest`. |
-| `handleDecision(requestId, responses, status, ...)` | platform only | **Step 3 callback.** Cancels `lastOrderId[agentId]` (if set). Market Maker special-case: places both bid (−0.1%) and ask (+0.1%) and skips LLM result. All other agents: decodes BUY/SELL/HOLD, calls `Exchange.placeOrder()`, stores new `lastOrderId`. Calls `_retrigger()` to start the next cycle. |
+| `triggerAgentDecision(string agentId)` | anyone | **Step 1.** Fires JSON API price fetch via `platform.createRequest`. Called once per agent at startup; after that `_retrigger()` calls it on-chain. |
+| `triggerWithPrice(string agentId, uint256 rawPrice)` | owner | Skips the JSON API fetch and fires the LLM request directly with a caller-supplied price. Used by the backend watchdog. |
+| `handlePriceData(requestId, responses, status, ...)` | platform only | **Step 2 callback.** Decodes fetched price, builds context string (price + peer signals + win streak) via `_buildContext()`, fires LLM inference. |
+| `handleDecision(requestId, responses, status, ...)` | platform only | **Step 3 callback.** Cancels `lastOrderId[agentId]`. Market Maker: places both bid (−0.1%) and ask (+0.1%), returns. Directional agents: decodes BUY/SELL/HOLD, stores `lastDecision[agentId]`, checks `_coalitionCount()` (fires `_fireCoalitionOrder()` if == 3), places order via `_orderAmount()`, updates `winStreak`. Calls `_retrigger()`. |
 | `_retrigger(agentId)` | internal | Checks balance ≥ `deposit × 2`, fires next JSON API fetch, or emits `LoopStopped`. |
-| `setAgentConfig(agentId, url, selector, decimals)` | owner | Sets price URL and JSON path for an agent |
-| `setSystemPrompt(string agentId, string prompt)` | owner | Stores strategy prompt on-chain for an agent |
+| `_buildContext(fetchedPrice, agentId)` | internal view | Builds the full LLM prompt: price, last fill, bid/ask, peer signals (`_buildPeerSignals()`), win streak info. Emitted on-chain in `LLMRequestFired.context`. |
+| `_buildPeerSignals(excludeId)` | internal view | Returns `"agentId=DECISION,..."` for all peers with a recorded `lastDecision`, excluding self and market_maker (non-directional). Returns `"none"` if no peers have decided yet. |
+| `_orderAmount(agentId)` | internal view | Returns `ORDER_AMOUNT_BASE × (1 + winStreak/5)`, capped at `ORDER_AMOUNT_MAX`. |
+| `_coalitionCount(direction)` | internal view | Counts agents in `_agentIdList` whose `lastDecision` equals `direction`. |
+| `_fireCoalitionOrder(isBuy, basePrice)` | internal | Places a `ORDER_AMOUNT_BASE × 3` coalition order at ±0.1% from base price. Emits `CoalitionFormed`. |
+| `setAgentConfig(agentId, url, selector, decimals)` | owner | Sets price URL and JSON path; appends to `_agentIdList` if not already present. |
+| `setSystemPrompt(string agentId, string prompt)` | owner | Stores strategy prompt on-chain |
 | `setLlmAgentId(uint256 id)` | owner | Updates the Somnia platform LLM agent ID |
 | `setJsonApiAgentId(uint256 id)` | owner | Updates the Somnia platform JSON API agent ID |
+| `approveToken(address _token, address spender, uint256 amount)` | owner | Calls `ERC20.approve(spender, amount)` from the coordinator's address — used once after deploy to grant Exchange a max allowance over the coordinator's AGT pool |
 | `fund()` | anyone (payable) | Adds STT to coordinator balance for inference deposits |
 | `withdraw()` | owner | Withdraws all coordinator STT balance |
 
@@ -238,17 +296,45 @@ Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-trigg
 ```solidity
 event DecisionTriggered(uint256 indexed requestId, string agentId);
 event PriceFetchFailed(uint256 indexed requestId, string agentId);
-event LLMRequestFired(uint256 indexed llmRequestId, string agentId, uint256 fetchedPrice);
-event DecisionExecuted(uint256 indexed requestId, string agentId, string decision, uint256 price, uint256 orderId);
+
+// context: the full LLM prompt (including peer signals and streak), verifiable on explorer
+event LLMRequestFired(
+    uint256 indexed llmRequestId,
+    string agentId,
+    uint256 fetchedPrice,
+    string context
+);
+
+// streak: agent's consecutive win count after this decision
+event DecisionExecuted(
+    uint256 indexed requestId,
+    string agentId,
+    string decision,
+    uint256 price,
+    uint256 orderId,
+    uint256 streak
+);
+
 event DecisionFailed(uint256 indexed requestId, string agentId, string reason);
 event LoopStopped(string agentId, string reason, uint256 balance);
+
+// Fires when _coalitionCount(direction) == 3 — exactly once per convergence event
+event CoalitionFormed(string direction, uint256 agentCount, uint256 price, uint256 orderId);
 ```
 
 `LoopStopped` fires when `_retrigger()` cannot proceed — either because the coordinator's STT balance is below `deposit × 2`, or because no `agentConfig` is registered for that agent ID. Monitor this event to know when to top up via `fund()`.
 
+**Multi-agent coordination flow:**
+
+1. Agent A decides BUY → `lastDecision["agentA"] = "BUY"`, `winStreak["agentA"]++`
+2. Agent B's next LLM prompt includes `"Peers: agentA=BUY"` via `_buildPeerSignals()`
+3. Agent B also decides BUY → `lastDecision["agentB"] = "BUY"`, `_coalitionCount("BUY")` = 2
+4. Agent C decides BUY → `_coalitionCount("BUY")` = 3 → `_fireCoalitionOrder()` fires before C's own order
+5. Dashboard receives `CoalitionFormed("BUY", 3, price, orderId)` as a `coalition_alert` WebSocket message
+
 **Deployment:** `deploy.js` automatically sets `systemPrompts` and `agentConfigs` for all 5 agents and funds the coordinator with 0.2 STT. Each full cycle (JSON fetch + LLM inference) consumes 2 deposits. Top up via `fund()` to keep agents running. The Python backend monitors the coordinator balance and emits `loop_stopped_any` in the `chain_metrics` feed when a `LoopStopped` event is detected.
 
-**Note:** `noise_trader` has a system prompt set on-chain (for completeness and testnet registration) but does not use the coordinator loop. Its orders are placed directly from the Python `_noise_trader_loop` coroutine.
+**Note:** `noise_trader` has a system prompt set on-chain (for completeness and testnet registration) but does not use the coordinator loop. Its orders are placed directly from the Python `_noise_trader_loop` coroutine. Because market_maker always returns before `lastDecision` is stored, it never contributes to `_buildPeerSignals()` or `_coalitionCount()` — coalition logic applies only to the 3 directional agents.
 
 ---
 
@@ -374,12 +460,16 @@ Runs one full decision cycle per agent manually (no daemon needed), verifying `D
 ### `scripts/deploy.js`
 
 1. Gets deployer signer from hardhat
-2. Deploys `Exchange`, `AgentRegistry`, `Treasury`, `AgentCoordinator` sequentially
-3. Calls `AgentCoordinator.setSystemPrompt()` for all 5 agents (market_maker, momentum_trader, arbitrage_agent, risk_manager, noise_trader) — prompts stored on-chain
-4. Funds `AgentCoordinator` with 0.2 STT for LLM inference deposits
-5. Reads compiled ABIs from `artifacts/`
-6. Writes `deployments/somnia-testnet.json` with addresses + ABIs
-7. Prints the exact env vars to copy into `backend/.env` (including `AGENT_COORDINATOR_ADDRESS`)
+2. Deploys `AgentToken` (symbol `AGT`)
+3. Deploys `Exchange(tokenAddr)` — Exchange is wired to AGT at construction
+4. Deploys `AgentRegistry`, `Treasury`, `AgentCoordinator` sequentially
+5. Calls `AgentCoordinator.setAgentConfig()` and `setSystemPrompt()` for all 5 agents — prompts and price-fetch config stored on-chain
+6. Funds `AgentCoordinator` with 0.2 STT for LLM inference deposits
+7. Mints 10 million AGT to the coordinator (shared pool for 4 on-chain agents)
+8. Calls `coordinator.approveToken(tokenAddr, exchangeAddr, MaxUint256)` — grants Exchange a max spending allowance over the pool
+9. Reads compiled ABIs from `artifacts/`
+10. Writes `deployments/somnia-testnet.json` with addresses + ABIs
+11. Prints the exact env vars to copy into `backend/.env` (including `AGENT_TOKEN_ADDRESS`)
 
 **Output file format** (`deployments/somnia-testnet.json`):
 
@@ -389,12 +479,14 @@ Runs one full decision cycle per agent manually (no daemon needed), verifying `D
   "deployedAt": "2025-...",
   "deployer": "0x...",
   "contracts": {
+    "AgentToken":        { "address": "0x..." },
     "Exchange":          { "address": "0x..." },
     "AgentRegistry":     { "address": "0x..." },
     "Treasury":          { "address": "0x..." },
     "AgentCoordinator":  { "address": "0x..." }
   },
   "abis": {
+    "AgentToken": [...],
     "Exchange": [...],
     "AgentRegistry": [...],
     "Treasury": [...],
@@ -413,13 +505,16 @@ This file is tracked in git (no secrets — only addresses and ABIs). The backen
 
 ### `scripts/seed.js`
 
-Requires: `deployments/somnia-testnet.json` + all 4 agent PKs in `.env`
+Requires: `deployments/somnia-testnet.json` + all 5 agent PKs in `.env`
 
 For each agent:
 
 1. Reads PK from env, skips gracefully if placeholder
 2. Calls `AgentRegistry.register(address, name, strategy)` if not already registered
 3. Calls `Treasury.depositFor(address)` with 0.1 STT
+4. Checks native gas balance — sends 0.05 STT from deployer if wallet holds < 0.01 STT
+5. Mints 1 million AGT to the agent wallet (skips if balance > 0)
+6. Calls `token.approve(Exchange, MaxUint256)` from the agent wallet — required for SELL orders placed directly (noise_trader and any agent calling Exchange outside the coordinator)
 
 ### `scripts/verify.js`
 
@@ -474,12 +569,14 @@ The backend (`blockchain/client.py`) also hardcodes the same value.
 
 ## Troubleshooting
 
-| Symptom                                      | Cause                                          | Fix                                                                                                  |
-| -------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `deploy.js` fails with "insufficient funds"  | Deployer wallet needs more STT                 | Fund via faucet, allow a few seconds for balance to propagate                                        |
-| `deploy.js` fails with "invalid private key" | Placeholder PK in `.env`                       | Fill real `DEPLOYER_PRIVATE_KEY`                                                                     |
-| `seed.js` throws "Cannot read deployments"   | `deploy.js` hasn't been run                    | Run `deploy.js` first                                                                                |
-| `seed.js` skips all agents                   | Agent PKs are still placeholder `0x_...`       | Fill all 4 agent PKs in `.env`                                                                       |
-| `verify.js` shows 0 agents                   | `seed.js` was skipped or failed                | Run `seed.js`                                                                                        |
-| Backend logs "contract not found"            | `backend/.env` still has placeholder addresses | Copy the addresses printed by `deploy.js`                                                            |
-| Tx reverted on testnet                       | Gas too low or nonce conflict                  | Gas is hardcoded (shouldn't be the issue); nonce conflicts are handled by per-wallet Lock in backend |
+| Symptom                                         | Cause                                           | Fix                                                                                                  |
+| ----------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `deploy.js` fails with "insufficient funds"     | Deployer wallet needs more STT                  | Fund via faucet, allow a few seconds for balance to propagate                                        |
+| `deploy.js` fails with "invalid private key"    | Placeholder PK in `.env`                        | Fill real `DEPLOYER_PRIVATE_KEY`                                                                     |
+| `seed.js` throws "Cannot read deployments"      | `deploy.js` hasn't been run                     | Run `deploy.js` first                                                                                |
+| `seed.js` skips all agents                      | Agent PKs are still placeholder `0x_...`        | Fill all 5 agent PKs in `.env`                                                                       |
+| SELL order reverts with "Token transfer failed" | Agent wallet has no AGT or no Exchange approval | Run `seed.js` again; for coordinator SELL orders call `approveToken()` with a funded deployer wallet |
+| `seed.js` skips gas funding for a wallet        | Balance already ≥ 0.01 STT                      | Normal — script is idempotent; no action needed                                                      |
+| `verify.js` shows 0 agents                      | `seed.js` was skipped or failed                 | Run `seed.js`                                                                                        |
+| Backend logs "contract not found"               | `backend/.env` still has placeholder addresses  | Copy the addresses printed by `deploy.js`                                                            |
+| Tx reverted on testnet                          | Gas too low or nonce conflict                   | Gas is hardcoded (shouldn't be the issue); nonce conflicts are handled by per-wallet Lock in backend |

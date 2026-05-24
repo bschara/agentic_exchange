@@ -23,6 +23,8 @@ function makeDefaultAgent(agent_id: AgentState['agent_id'], agent_name: string):
     last_decision: null,
     last_price: 0,
     last_fetched_price: 0,
+    last_context: '',
+    win_streak: 0,
     loop_stopped: false,
     loop_stopped_reason: null,
     last_order_id: null,

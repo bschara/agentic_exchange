@@ -74,6 +74,17 @@ function dispatch(msg: WSMessage) {
         timestamp: Math.floor(Date.now() / 1000),
       });
       break;
+
+    case 'coalition_alert':
+      useFeedStore.getState().addItem({
+        id: `coalition-${Date.now()}`,
+        agent_id: 'coalition',
+        agent_name: 'Coalition',
+        message: `⚡ 3-agent consensus: ${msg.data.direction} @ $${msg.data.price.toFixed(2)} — 3× order placed`,
+        category: 'coalition',
+        timestamp: Math.floor(Date.now() / 1000),
+      });
+      break;
   }
 }
 

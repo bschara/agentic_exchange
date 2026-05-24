@@ -83,11 +83,14 @@ async function main() {
 
   const provider = new ethers.JsonRpcProvider(RPC_URL);
   const wallet = new ethers.Wallet(DEPLOYER_PK, provider);
+  // NonceManager tracks nonces in-memory after the first fetch, avoiding provider cache staleness
+  // that causes "nonce too low" when two queue items fire in rapid succession.
+  const managedWallet = new ethers.NonceManager(wallet);
 
   const mockPlatform = new ethers.Contract(
     dep.contracts.MockPlatform.address,
     dep.abis.MockPlatform,
-    wallet
+    managedWallet
   );
   const coordinator = new ethers.Contract(
     dep.contracts.AgentCoordinator.address,
@@ -117,10 +120,21 @@ async function main() {
   console.log('Listening for RequestCreated events...');
   console.log('');
 
-  // Sequential processing queue — prevents nonce collisions when multiple agents fire at once
+  // Sequential processing queue with per-request deduplication.
+  // _inFlight prevents the same requestId from being enqueued twice (live listener + replay race).
   let queue = Promise.resolve();
-  const enqueue = (fn) => {
-    queue = queue.then(fn).catch((err) => console.error('Queue error:', err.message));
+  const _inFlight = new Set();
+  const enqueue = (reqId, fn) => {
+    const key = String(reqId);
+    if (_inFlight.has(key)) {
+      console.log(`[Skip  ] reqId=${key} already in-flight — duplicate suppressed`);
+      return;
+    }
+    _inFlight.add(key);
+    queue = queue
+      .then(fn)
+      .catch((err) => console.error('Queue error:', err.message))
+      .finally(() => _inFlight.delete(key));
   };
 
   // On startup, check the coordinator's on-chain pending mappings and only replay requests
@@ -150,7 +164,7 @@ async function main() {
       for (const { requestId, sel } of pending) {
         const rid = requestId;
         const s = sel;
-        enqueue(async () => {
+        enqueue(rid, async () => {
           try {
             if (s === handlePriceDataSel) {
               const price = await fetchEthPrice();
@@ -187,7 +201,7 @@ async function main() {
   });
 
   mockPlatform.on('RequestCreated', (requestId, agentIdNum, callbackAddress, callbackSelector) => {
-    enqueue(async () => {
+    enqueue(requestId, async () => {
       const reqIdStr = requestId.toString();
 
       if (callbackSelector === handlePriceDataSel) {
