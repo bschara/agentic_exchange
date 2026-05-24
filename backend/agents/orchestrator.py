@@ -13,7 +13,7 @@ from web3 import Web3
 from config import settings
 from market.price_engine import ChainPriceTracker
 from market.state_bus import MarketStateBus
-from blockchain.contracts import ExchangeContract, TreasuryContract, AgentCoordinatorContract
+from blockchain.contracts import ExchangeContract, TreasuryContract, AgentCoordinatorContract, AgentRegistryContract
 from api.websocket_hub import ConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -27,11 +27,11 @@ def _is_address(addr: str) -> bool:
 
 
 AGENT_CONFIGS = [
-    {"id": "market_maker",     "name": "MM-Prime",       "pk_key": "market_maker_pk"},
-    {"id": "momentum_trader",  "name": "Momentum-Alpha", "pk_key": "momentum_trader_pk"},
-    {"id": "arbitrage_agent",  "name": "Arb-Scanner",    "pk_key": "arbitrage_agent_pk"},
-    {"id": "risk_manager",     "name": "Risk-Shield",    "pk_key": "risk_manager_pk"},
-    {"id": "noise_trader",     "name": "Noise-Bot",      "pk_key": "noise_trader_pk"},
+    {"id": "market_maker",    "pk_key": "market_maker_pk"},
+    {"id": "momentum_trader", "pk_key": "momentum_trader_pk"},
+    {"id": "arbitrage_agent", "pk_key": "arbitrage_agent_pk"},
+    {"id": "risk_manager",    "pk_key": "risk_manager_pk"},
+    {"id": "noise_trader",    "pk_key": "noise_trader_pk"},
 ]
 
 
@@ -43,14 +43,15 @@ def _load_local_deployment():
     try:
         dep = json.loads(json_path.read_text())
         c = dep.get("contracts", {})
-        if c.get("Exchange", {}).get("address") and not _is_address(settings.exchange_address):
+        is_local = "127.0.0.1" in settings.somnia_rpc_url or "localhost" in settings.somnia_rpc_url
+        if c.get("Exchange", {}).get("address") and (is_local or not _is_address(settings.exchange_address)):
             settings.exchange_address         = c["Exchange"]["address"]
             settings.treasury_address         = c["Treasury"]["address"]
             settings.agent_coordinator_address = c["AgentCoordinator"]["address"]
             settings.agent_registry_address   = c.get("AgentRegistry", {}).get("address", settings.agent_registry_address)
             logger.info(f"Loaded contract addresses from {json_path.name}")
 
-        # Load agent PKs if .env has placeholders (enables zero-config local dev)
+        # Load agent PKs if .env has placeholders or on local devnet (enables zero-config local dev)
         agents_data = dep.get("agents", {})
         pk_map = {
             "market_maker":    "market_maker_pk",
@@ -62,7 +63,7 @@ def _load_local_deployment():
         for agent_id, pk_key in pk_map.items():
             pk = agents_data.get(agent_id, {}).get("pk", "")
             current = getattr(settings, pk_key, "")
-            if pk and (not current or current == "0x0000000000000000000000000000000000000000000000000000000000000000"):
+            if pk and (is_local or not current or current == "0x0000000000000000000000000000000000000000000000000000000000000000"):
                 setattr(settings, pk_key, pk)
                 logger.info(f"Loaded {agent_id} PK from {json_path.name}")
     except Exception as e:
@@ -82,6 +83,7 @@ class AgentOrchestrator:
         self._exchange: Optional[ExchangeContract] = None
         self._treasury: Optional[TreasuryContract] = None
         self._coordinator: Optional[AgentCoordinatorContract] = None
+        self._registry: Optional[AgentRegistryContract] = None
 
         if _is_address(settings.exchange_address):
             self._exchange = ExchangeContract(settings.exchange_address, settings.somnia_rpc_url)
@@ -90,6 +92,8 @@ class AgentOrchestrator:
                 self._coordinator = AgentCoordinatorContract(
                     settings.agent_coordinator_address, settings.somnia_rpc_url
                 )
+        if _is_address(settings.agent_registry_address):
+            self._registry = AgentRegistryContract(settings.agent_registry_address, settings.somnia_rpc_url)
 
         # Must be initialized before the agents loop so wallet_address can be propagated
         self._chain_metrics: dict = self._build_initial_chain_metrics()
@@ -105,16 +109,19 @@ class AgentOrchestrator:
                 logger.warning(f"Invalid private key for {cfg['id']} — wallet address set to zero")
             self.agents[cfg["id"]] = {
                 "agent_id":       cfg["id"],
-                "agent_name":     cfg["name"],
+                "agent_name":     cfg["id"],  # overwritten by registry sync on first cycle
                 "wallet_address": wallet,
             }
             # Propagate wallet_address into chain_metrics initial state
             if cfg["id"] in self._chain_metrics.get("agents", {}):
                 self._chain_metrics["agents"][cfg["id"]]["wallet_address"] = wallet
 
-        # Address → agent_id mapping — built once, shared by both polling loops
+        # Address ↔ agent_id mappings — built once, extended as new agents are discovered
         self._wallet_to_id: dict[str, str] = {
             a["wallet_address"].lower(): a["agent_id"] for a in self.agents.values()
+        }
+        self._id_to_wallet: dict[str, str] = {
+            a["agent_id"]: a["wallet_address"].lower() for a in self.agents.values()
         }
         # Tracks the block at which each agent's last DecisionTriggered event fired
         self._decision_trigger_blocks: dict[str, int] = {}
@@ -127,6 +134,41 @@ class AgentOrchestrator:
         self._noise_task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
 
+    @staticmethod
+    def _empty_agent_metrics(agent_id: str) -> dict:
+        return {
+            "agent_id":                 agent_id,
+            "agent_name":               agent_id,  # overwritten by registry sync
+            "strategy":                 "",
+            "reputation":               100,
+            "trades_on_chain":          0,
+            "registered_at":            0,
+            "active":                   True,
+            "decisions_total":          0,
+            "buy_count":                0,
+            "sell_count":               0,
+            "hold_count":               0,
+            "failures":                 0,
+            "orders_placed":            0,
+            "treasury_balance":         0.0,
+            "last_decision":            None,
+            "last_price":               0.0,
+            "last_order_id":            None,
+            "last_fetched_price":       0.0,
+            "last_context":             "",   # full LLM prompt from last LLMRequestFired
+            "win_streak":               0,    # consecutive filled orders
+            "loop_stopped":             False,
+            "loop_stopped_reason":      None,
+            "trade_pnl":                0.0,
+            "total_buy_volume":         0.0,
+            "total_sell_volume":        0.0,
+            "avg_decision_latency_ms":  0.0,
+            "decision_latency_count":   0,
+            "net_position":             0.0,
+            "unrealized_pnl":           0.0,
+            "wallet_address":           "",
+        }
+
     def _build_initial_chain_metrics(self) -> dict:
         return {
             "coordinator_balance": 0.0,
@@ -136,33 +178,10 @@ class AgentOrchestrator:
             "sell_depth": 0,
             "loop_stopped_any": False,
             "recent_fills": [],
+            "coalition_alert": None,  # set when CoalitionFormed fires, cleared after broadcast
             "somnia_block_ms": settings.somnia_block_ms,
             "agents": {
-                cfg["id"]: {
-                    "agent_id":                 cfg["id"],
-                    "agent_name":               cfg["name"],
-                    "decisions_total":          0,
-                    "buy_count":                0,
-                    "sell_count":               0,
-                    "hold_count":               0,
-                    "failures":                 0,
-                    "orders_placed":            0,
-                    "treasury_balance":         0.0,
-                    "last_decision":            None,
-                    "last_price":               0.0,
-                    "last_order_id":            None,
-                    "last_fetched_price":       0.0,
-                    "loop_stopped":             False,
-                    "loop_stopped_reason":      None,
-                    "trade_pnl":                0.0,
-                    "total_buy_volume":         0.0,
-                    "total_sell_volume":        0.0,
-                    "avg_decision_latency_ms":  0.0,
-                    "decision_latency_count":   0,
-                    "net_position":             0.0,
-                    "unrealized_pnl":           0.0,
-                    "wallet_address":           "",
-                }
+                cfg["id"]: self._empty_agent_metrics(cfg["id"])
                 for cfg in AGENT_CONFIGS
             },
             "last_update": 0.0,
@@ -314,6 +333,45 @@ class AgentOrchestrator:
                 logger.error(f"Snapshot broadcast error: {e}")
             await asyncio.sleep(2.0)
 
+    async def _sync_registry_data(self):
+        """Discover all on-chain agents and sync their metadata into chain_metrics."""
+        if not self._registry:
+            return
+        try:
+            addresses = await self._registry.get_all_agents()
+            for addr in addresses:
+                info = await self._registry.get_agent(addr)
+                if not info:
+                    continue
+
+                # Wallet mapping is authoritative — strategy field is human-readable, not an ID.
+                # Using strategy as fallback only for genuinely unknown wallets.
+                agent_id = self._wallet_to_id.get(addr.lower()) or info.get("strategy")
+                if not agent_id:
+                    continue
+
+                # If this wallet is already mapped but agent_id isn't in chain_metrics, skip —
+                # that means the wallet belongs to a known agent whose metrics entry exists under
+                # a different key. Never auto-create a duplicate entry for a known wallet.
+                if agent_id not in self._chain_metrics["agents"]:
+                    if self._wallet_to_id.get(addr.lower()):
+                        continue
+                    self._chain_metrics["agents"][agent_id] = self._empty_agent_metrics(agent_id)
+                    self._wallet_to_id[addr.lower()] = agent_id
+                    self._id_to_wallet[agent_id] = addr.lower()
+                    logger.info(f"Discovered new agent from registry: {agent_id} ({addr})")
+
+                ag = self._chain_metrics["agents"][agent_id]
+                ag["agent_name"]      = info.get("name") or agent_id
+                ag["strategy"]        = info.get("strategy", "")
+                ag["reputation"]      = info.get("reputation", 100)
+                ag["trades_on_chain"] = info.get("tradesExecuted", 0)
+                ag["registered_at"]   = info.get("registeredAt", 0)
+                ag["active"]          = info.get("active", True)
+                ag["wallet_address"]  = addr
+        except Exception as e:
+            logger.debug(f"Registry sync failed: {e}")
+
     async def _contract_metrics_poll_loop(self):
         """Polls on-chain contract state every 5s and broadcasts as chain_metrics."""
         from_block = 0
@@ -329,6 +387,7 @@ class AgentOrchestrator:
         while True:
             try:
                 from_block = await self._collect_chain_metrics(from_block, self._wallet_to_id)
+                await self._sync_registry_data()
             except Exception as e:
                 logger.error(f"Contract metrics poll error: {e}")
             await asyncio.sleep(5.0)
@@ -354,6 +413,7 @@ class AgentOrchestrator:
 
                 elif ev["event"] == "DecisionExecuted" and agent:
                     decision = ev.get("decision", "")
+                    order_id = ev.get("orderId", 0)
                     agent["decisions_total"] += 1
                     if decision == "BUY":
                         agent["buy_count"] += 1
@@ -362,9 +422,10 @@ class AgentOrchestrator:
                     else:
                         agent["hold_count"] += 1
                     agent["last_decision"] = decision
+                    agent["win_streak"] = int(ev.get("streak", 0))
                     price_wei = ev.get("price", 0)
                     agent["last_price"] = float(Web3.from_wei(price_wei, "ether")) if price_wei else 0.0
-                    agent["last_order_id"] = ev.get("orderId")
+                    agent["last_order_id"] = order_id
 
                     # Latency: blocks from trigger to execution × ms per block
                     agent_id_str = ev.get("agentId", "")
@@ -390,6 +451,38 @@ class AgentOrchestrator:
 
                 elif ev["event"] == "LLMRequestFired" and agent:
                     agent["last_fetched_price"] = float(ev.get("fetchedPrice", 0))
+                    agent["last_context"] = ev.get("context", "")
+
+                elif ev["event"] == "CoalitionFormed":
+                    direction  = ev.get("direction", "")
+                    price_wei  = ev.get("price", 0)
+                    order_id   = ev.get("orderId", 0)
+                    price_eth  = float(Web3.from_wei(price_wei, "ether")) if price_wei else 0.0
+                    alert = {
+                        "direction":   direction,
+                        "agent_count": int(ev.get("agentCount", 3)),
+                        "price":       round(price_eth, 4),
+                        "order_id":    order_id,
+                        "block":       ev["block"],
+                        "timestamp":   time.time(),
+                    }
+                    metrics["coalition_alert"] = alert
+                    metrics["recent_fills"].insert(0, {
+                        "price":        round(price_eth, 4),
+                        "amount":       0.003,  # 3× base = ORDER_AMOUNT_BASE * 3
+                        "buyer_agent":  "coalition" if direction == "BUY" else "external",
+                        "seller_agent": "coalition" if direction == "SELL" else "external",
+                        "block":        ev["block"],
+                        "tx_hash":      "",
+                        "category":     "coalition",
+                    })
+                    metrics["recent_fills"] = metrics["recent_fills"][:20]
+                    logger.info(f"Coalition formed: {direction} × 3 agents @ ${price_eth:.2f} orderId={order_id}")
+                    await self._hub.broadcast({
+                        "type": "coalition_alert",
+                        "data": alert,
+                        "timestamp": time.time(),
+                    })
 
         # ── Exchange ─────────────────────────────────────────────────────────────
         if self._exchange:
@@ -484,7 +577,9 @@ class AgentOrchestrator:
             try:
                 ref_price = self._price_tracker.price
                 if ref_price > 0 and self._exchange:
-                    is_buy = random.choice([True, False])
+                    # Noise trader has no AGT tokens so SELL orders revert (Exchange locks AGT on SELL).
+                    # Always BUY — main agents provide the SELL side via AgentCoordinator.
+                    is_buy = True
                     slippage = random.uniform(-0.005, 0.005)
                     price = ref_price * (1 + slippage)
                     amount = round(random.uniform(0.03, 0.08), 3)

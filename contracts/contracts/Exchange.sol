@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+interface IERC20 {
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
 contract Exchange {
     struct Order {
         uint256 id;
@@ -24,8 +29,14 @@ contract Exchange {
         uint256 timestamp;
     }
 
+    IERC20 public token;
+
     uint256 private _nextOrderId = 1;
     uint256 private _nextTradeId = 1;
+
+    constructor(address _token) {
+        token = IERC20(_token);
+    }
 
     // Last matched trade price — read by Python backend for real price discovery
     uint256 public lastTradePrice;
@@ -71,6 +82,10 @@ contract Exchange {
             active: true
         });
         _agentOrderIds[msg.sender].push(orderId);
+
+        if (!isBuy) {
+            require(token.transferFrom(msg.sender, address(this), amount), "Token transfer failed");
+        }
 
         emit OrderPlaced(orderId, msg.sender, isBuy, price, amount);
 
@@ -151,6 +166,11 @@ contract Exchange {
         Order storage order = orders[orderId];
         require(order.active, "Order not active");
         require(order.agent == msg.sender, "Not your order");
+
+        if (!order.isBuy) {
+            uint256 remaining = order.amount - order.filled;
+            if (remaining > 0) token.transfer(order.agent, remaining);
+        }
 
         order.active = false;
         if (order.isBuy) {
@@ -253,6 +273,8 @@ contract Exchange {
         hasTraded = true;
 
         emit TradeExecuted(tradeId, buyId, sellId, buyer, seller, fillPrice, fill);
+
+        token.transfer(buyer, fill);
     }
 
     function _removeAt(uint256[] storage arr, uint256 index) internal {

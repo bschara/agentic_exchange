@@ -27,8 +27,12 @@ async function main() {
 
   const registry = await hre.ethers.getContractAt('AgentRegistry', deployment.contracts.AgentRegistry.address);
   const treasury = await hre.ethers.getContractAt('Treasury', deployment.contracts.Treasury.address);
+  const token    = await hre.ethers.getContractAt('AgentToken', deployment.contracts.AgentToken.address);
 
-  const fundAmount = hre.ethers.parseEther('0.1');
+  const fundAmount    = hre.ethers.parseEther('0.1');
+  const gasFundAmount = hre.ethers.parseEther('0.05');
+  const gasFundMin    = hre.ethers.parseEther('0.01');
+  const agentMint     = hre.ethers.parseEther('1000000'); // 1M AGT per wallet
 
   for (const agent of AGENTS) {
     const pk = process.env[agent.envKey];
@@ -52,7 +56,29 @@ async function main() {
 
     const tx2 = await treasury.depositFor(agentAddr, { value: fundAmount });
     await tx2.wait();
-    console.log(`  ✓ Funded with ${hre.ethers.formatEther(fundAmount)} STT`);
+    console.log(`  ✓ Treasury funded with ${hre.ethers.formatEther(fundAmount)} STT`);
+
+    // Gas funding — send STT to agent wallet so it can pay gas
+    const gasBalance = await hre.ethers.provider.getBalance(agentAddr);
+    if (gasBalance < gasFundMin) {
+      await (await deployer.sendTransaction({ to: agentAddr, value: gasFundAmount })).wait();
+      console.log(`  ✓ Sent ${hre.ethers.formatEther(gasFundAmount)} STT for gas`);
+    } else {
+      console.log(`  Gas balance OK (${hre.ethers.formatEther(gasBalance)} STT)`);
+    }
+
+    // Mint AGT and approve Exchange for each agent wallet
+    const agtBalance = await token.balanceOf(agentAddr);
+    if (agtBalance === 0n) {
+      await (await token.mint(agentAddr, agentMint)).wait();
+      console.log(`  ✓ Minted ${hre.ethers.formatEther(agentMint)} AGT`);
+    } else {
+      console.log(`  AGT balance OK (${hre.ethers.formatEther(agtBalance)} AGT)`);
+    }
+
+    const tokenAsAgent = token.connect(wallet);
+    await (await tokenAsAgent.approve(deployment.contracts.Exchange.address, hre.ethers.MaxUint256)).wait();
+    console.log('  ✓ Approved Exchange for AGT');
   }
 
   console.log('\n✓ Seed complete');

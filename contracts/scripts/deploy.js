@@ -23,9 +23,16 @@ async function main() {
   const balance = await hre.ethers.provider.getBalance(deployer.address);
   console.log('Balance:', hre.ethers.formatEther(balance), 'STT');
 
-  // Deploy Exchange (real on-chain LOB with matching engine)
+  // Deploy AgentToken (mintable ERC20 for on-chain P&L settlement)
+  const AgentToken = await hre.ethers.getContractFactory('AgentToken');
+  const token = await AgentToken.deploy('AgentToken', 'AGT');
+  await token.waitForDeployment();
+  const tokenAddr = await token.getAddress();
+  console.log('AgentToken deployed to:', tokenAddr);
+
+  // Deploy Exchange with token address (locks AGT on SELL, settles on fill)
   const Exchange = await hre.ethers.getContractFactory('Exchange');
-  const exchange = await Exchange.deploy();
+  const exchange = await Exchange.deploy(tokenAddr);
   await exchange.waitForDeployment();
   const exchangeAddr = await exchange.getAddress();
   console.log('Exchange deployed to:', exchangeAddr);
@@ -132,7 +139,17 @@ async function main() {
   await fundTx.wait();
   console.log(`AgentCoordinator funded with ${hre.ethers.formatEther(coordinatorFund)} STT`);
 
+  // Mint 10M AGT to coordinator (pool for all 4 main agents)
+  const COORDINATOR_MINT = hre.ethers.parseEther('10000000');
+  await (await token.mint(coordinatorAddr, COORDINATOR_MINT)).wait();
+  console.log('Minted 10M AGT to AgentCoordinator');
+
+  // Coordinator approves Exchange (max allowance — coordinator holds the shared pool)
+  await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log('AgentCoordinator approved Exchange for AGT');
+
   // Read ABIs from artifacts
+  const tokenArtifact       = await hre.artifacts.readArtifact('AgentToken');
   const exchangeArtifact    = await hre.artifacts.readArtifact('Exchange');
   const registryArtifact    = await hre.artifacts.readArtifact('AgentRegistry');
   const treasuryArtifact    = await hre.artifacts.readArtifact('Treasury');
@@ -143,12 +160,14 @@ async function main() {
     deployedAt: new Date().toISOString(),
     deployer: deployer.address,
     contracts: {
+      AgentToken:       { address: tokenAddr },
       Exchange:         { address: exchangeAddr },
       AgentRegistry:    { address: registryAddr },
       Treasury:         { address: treasuryAddr },
       AgentCoordinator: { address: coordinatorAddr },
     },
     abis: {
+      AgentToken:       tokenArtifact.abi,
       Exchange:         exchangeArtifact.abi,
       AgentRegistry:    registryArtifact.abi,
       Treasury:         treasuryArtifact.abi,
@@ -170,6 +189,7 @@ async function main() {
   console.log('\nDeployment saved to:', outPath);
 
   console.log('\n─── Add to backend/.env ───────────────────────────────');
+  console.log(`AGENT_TOKEN_ADDRESS=${tokenAddr}`);
   console.log(`EXCHANGE_ADDRESS=${exchangeAddr}`);
   console.log(`AGENT_REGISTRY_ADDRESS=${registryAddr}`);
   console.log(`TREASURY_ADDRESS=${treasuryAddr}`);

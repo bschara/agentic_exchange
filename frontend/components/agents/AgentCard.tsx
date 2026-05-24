@@ -68,7 +68,17 @@ export function AgentCard({ agent }: { agent: AgentState }) {
         <div className="flex items-center gap-2">
           <span className="text-lg">{AGENT_ICONS[agent.agent_id]}</span>
           <div className="flex flex-col gap-0.5">
-            <span className="text-sm font-bold text-white">{agent.agent_name}</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-bold text-white">{agent.agent_name}</span>
+              {(agent.win_streak ?? 0) > 0 && (
+                <span
+                  title={`${agent.win_streak} consecutive filled orders — order size ×${1 + Math.floor(agent.win_streak / 5)}`}
+                  className="text-[10px] font-bold px-1 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/40 animate-pulse"
+                >
+                  🔥 {agent.win_streak}
+                </span>
+              )}
+            </div>
             <span
               title="Decisions made by Somnia's on-chain LLM validator consensus"
               className="text-[10px] font-semibold px-1.5 py-0.5 rounded w-fit bg-violet-500/20 text-violet-300 border border-violet-500/40"

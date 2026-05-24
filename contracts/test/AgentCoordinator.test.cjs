@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 // MockPlatform.getRequestDeposit() returns 0, so all balance guards pass without
 // funding the coordinator.
@@ -17,7 +18,8 @@ describe("AgentCoordinator", function () {
     const [owner, stranger] = await ethers.getSigners();
 
     const platform    = await ethers.deployContract("MockPlatform");
-    const exchange    = await ethers.deployContract("Exchange");
+    const token       = await ethers.deployContract("AgentToken", ["Test Token", "TST"]);
+    const exchange    = await ethers.deployContract("Exchange", [await token.getAddress()]);
     const coordinator = await ethers.deployContract("AgentCoordinator", [
       await platform.getAddress(),
       await exchange.getAddress(),
@@ -25,10 +27,18 @@ describe("AgentCoordinator", function () {
       2n, // jsonApiAgentId
     ]);
 
+    // Mint AGT to coordinator and approve Exchange so SELL orders don't revert
+    await token.mint(await coordinator.getAddress(), ethers.parseEther("1000000"));
+    await coordinator.approveToken(
+      await token.getAddress(),
+      await exchange.getAddress(),
+      ethers.MaxUint256
+    );
+
     await coordinator.setAgentConfig(AGENT_ID, "https://api.example.com/eth", "$.price", 0);
     await coordinator.setSystemPrompt(AGENT_ID, "Reply BUY, SELL, or HOLD.");
 
-    return { coordinator, platform, exchange, owner, stranger };
+    return { coordinator, platform, exchange, token, owner, stranger };
   }
 
   // Stage 1: fires price fetch (reqId=1) then delivers price data (llmReqId=2).
@@ -122,7 +132,7 @@ describe("AgentCoordinator", function () {
 
       await expect(platform.simulatePriceCallback(1n, 3000n))
         .to.emit(coordinator, "LLMRequestFired")
-        .withArgs(2n, AGENT_ID, 3000n);
+        .withArgs(2n, AGENT_ID, 3000n, anyValue);
 
       const llmPending = await coordinator.pendingLLMRequests(2n);
       expect(llmPending.agentId).to.equal(AGENT_ID);
@@ -144,7 +154,7 @@ describe("AgentCoordinator", function () {
 
       await expect(platform.simulateLLMCallback(2n, "BUY"))
         .to.emit(coordinator, "DecisionExecuted")
-        .withArgs(2n, AGENT_ID, "BUY", buyPrice, 1n)
+        .withArgs(2n, AGENT_ID, "BUY", buyPrice, 1n, anyValue)
         .and.to.emit(coordinator, "DecisionTriggered") // _retrigger fires immediately
         .withArgs(3n, AGENT_ID);
 
@@ -160,7 +170,7 @@ describe("AgentCoordinator", function () {
 
       await expect(platform.simulateLLMCallback(2n, "SELL"))
         .to.emit(coordinator, "DecisionExecuted")
-        .withArgs(2n, AGENT_ID, "SELL", sellPrice, 1n);
+        .withArgs(2n, AGENT_ID, "SELL", sellPrice, 1n, anyValue);
     });
 
     it("HOLD: emits DecisionExecuted with price=0 and orderId=0, places no order", async function () {
@@ -169,7 +179,7 @@ describe("AgentCoordinator", function () {
 
       await expect(platform.simulateLLMCallback(2n, "HOLD"))
         .to.emit(coordinator, "DecisionExecuted")
-        .withArgs(2n, AGENT_ID, "HOLD", 0n, 0n);
+        .withArgs(2n, AGENT_ID, "HOLD", 0n, 0n, 0n);
 
       expect(await exchange.getActiveOrders()).to.deep.equal([]);
     });
@@ -210,12 +220,133 @@ describe("AgentCoordinator", function () {
 
       await expect(platform.simulateLLMCallback(2n, "HOLD")) // content irrelevant for market_maker
         .to.emit(coordinator, "DecisionExecuted")
-        .withArgs(2n, MM, "BUY",  bidPrice, 1n)
+        .withArgs(2n, MM, "BUY",  bidPrice, 1n, 0n)
         .and.to.emit(coordinator, "DecisionExecuted")
-        .withArgs(2n, MM, "SELL", askPrice, 2n);
+        .withArgs(2n, MM, "SELL", askPrice, 2n, 0n);
 
       expect((await exchange.getActiveBuys()).length).to.equal(1);
       expect((await exchange.getActiveSells()).length).to.equal(1);
+    });
+  });
+
+  describe("lastDecision and winStreak", function () {
+    it("stores lastDecision[agentId] after a BUY decision", async function () {
+      const { coordinator, platform } = await loadFixture(deployFixture);
+      await triggerAndFetchPrice(coordinator, platform); // reqs 1 & 2
+      await platform.simulateLLMCallback(2n, "BUY");
+      expect(await coordinator.lastDecision(AGENT_ID)).to.equal("BUY");
+    });
+
+    it("stores lastDecision[agentId] after a SELL decision", async function () {
+      const { coordinator, platform } = await loadFixture(deployFixture);
+      await triggerAndFetchPrice(coordinator, platform);
+      await platform.simulateLLMCallback(2n, "SELL");
+      expect(await coordinator.lastDecision(AGENT_ID)).to.equal("SELL");
+    });
+
+    it("stores lastDecision[agentId] = HOLD after a HOLD decision", async function () {
+      const { coordinator, platform } = await loadFixture(deployFixture);
+      await triggerAndFetchPrice(coordinator, platform);
+      await platform.simulateLLMCallback(2n, "HOLD");
+      expect(await coordinator.lastDecision(AGENT_ID)).to.equal("HOLD");
+    });
+
+    it("winStreak increments after a successful BUY and resets on HOLD", async function () {
+      const { coordinator, platform } = await loadFixture(deployFixture);
+
+      // Cycle 1: BUY fills → streak = 1
+      await triggerAndFetchPrice(coordinator, platform); // reqs 1 & 2
+      await platform.simulateLLMCallback(2n, "BUY");    // req 3 from _retrigger
+      expect(await coordinator.winStreak(AGENT_ID)).to.equal(1n);
+
+      // Cycle 2: HOLD → streak resets to 0
+      await platform.simulatePriceCallback(3n, 3000n);  // llmReqId=4
+      await platform.simulateLLMCallback(4n, "HOLD");
+      expect(await coordinator.winStreak(AGENT_ID)).to.equal(0n);
+    });
+
+    it("winStreak accumulates across multiple consecutive BUY fills", async function () {
+      const { coordinator, platform } = await loadFixture(deployFixture);
+
+      // Cycle 1: BUY → streak=1
+      await triggerAndFetchPrice(coordinator, platform); // reqs 1 & 2
+      await platform.simulateLLMCallback(2n, "BUY");    // req 3
+
+      // Cycle 2: BUY → streak=2
+      await platform.simulatePriceCallback(3n, 3000n);  // llmReqId=4
+      await platform.simulateLLMCallback(4n, "BUY");    // req 5
+
+      expect(await coordinator.winStreak(AGENT_ID)).to.equal(2n);
+    });
+  });
+
+  describe("CoalitionFormed", function () {
+    // Deploys with 3 directional agents so _coalitionCount can reach 3.
+    async function deployThreeAgentFixture() {
+      const [owner] = await ethers.getSigners();
+      const platform    = await ethers.deployContract("MockPlatform");
+      const token       = await ethers.deployContract("AgentToken", ["Test Token", "TST"]);
+      const exchange    = await ethers.deployContract("Exchange", [await token.getAddress()]);
+      const coordinator = await ethers.deployContract("AgentCoordinator", [
+        await platform.getAddress(),
+        await exchange.getAddress(),
+        1n, 2n,
+      ]);
+      await token.mint(await coordinator.getAddress(), ethers.parseEther("1000000"));
+      await coordinator.approveToken(
+        await token.getAddress(),
+        await exchange.getAddress(),
+        ethers.MaxUint256
+      );
+      // Register 3 directional agents (no market_maker — it's non-directional)
+      await coordinator.setAgentConfig("agent1", "https://api.example.com/eth", "$.price", 0);
+      await coordinator.setAgentConfig("agent2", "https://api.example.com/eth", "$.price", 0);
+      await coordinator.setAgentConfig("agent3", "https://api.example.com/eth", "$.price", 0);
+      return { coordinator, platform, exchange, token, owner };
+    }
+
+    it("emits CoalitionFormed when 3 agents all decide BUY", async function () {
+      const { coordinator, platform } = await loadFixture(deployThreeAgentFixture);
+
+      // Trigger all 3 price fetches — reqIds 1, 2, 3
+      await coordinator.triggerAgentDecision("agent1");
+      await coordinator.triggerAgentDecision("agent2");
+      await coordinator.triggerAgentDecision("agent3");
+
+      // Deliver prices — fires LLM requests with reqIds 4, 5, 6
+      await platform.simulatePriceCallback(1n, 3000n);
+      await platform.simulatePriceCallback(2n, 3000n);
+      await platform.simulatePriceCallback(3n, 3000n);
+
+      const basePrice = ethers.parseEther("3000");
+      const buyPrice  = basePrice * 10010n / 10000n;
+
+      // agent1 BUY: coalitionCount=1 — no coalition yet
+      await platform.simulateLLMCallback(4n, "BUY");
+      // agent2 BUY: coalitionCount=2 — no coalition yet
+      await platform.simulateLLMCallback(5n, "BUY");
+      // agent3 BUY: coalitionCount=3 → CoalitionFormed fires before agent3's own order
+      await expect(platform.simulateLLMCallback(6n, "BUY"))
+        .to.emit(coordinator, "CoalitionFormed")
+        .withArgs("BUY", 3n, buyPrice, anyValue);
+    });
+
+    it("does not emit CoalitionFormed when only 2 agents agree", async function () {
+      const { coordinator, platform } = await loadFixture(deployThreeAgentFixture);
+
+      await coordinator.triggerAgentDecision("agent1");
+      await coordinator.triggerAgentDecision("agent2");
+      await coordinator.triggerAgentDecision("agent3");
+
+      await platform.simulatePriceCallback(1n, 3000n);
+      await platform.simulatePriceCallback(2n, 3000n);
+      await platform.simulatePriceCallback(3n, 3000n);
+
+      // agent1 BUY, agent2 BUY, agent3 SELL — no consensus
+      await platform.simulateLLMCallback(4n, "BUY");
+      await platform.simulateLLMCallback(5n, "BUY");
+      await expect(platform.simulateLLMCallback(6n, "SELL"))
+        .to.not.emit(coordinator, "CoalitionFormed");
     });
   });
 
@@ -226,7 +357,7 @@ describe("AgentCoordinator", function () {
         .to.emit(coordinator, "DecisionTriggered")
         .withArgs(0n, AGENT_ID)
         .and.to.emit(coordinator, "LLMRequestFired")
-        .withArgs(1n, AGENT_ID, 3245n);
+        .withArgs(1n, AGENT_ID, 3245n, anyValue);
     });
 
     it("non-owner reverts", async function () {
@@ -252,7 +383,7 @@ describe("AgentCoordinator", function () {
 
       await expect(platform.simulateLLMCallback(1n, "BUY"))
         .to.emit(coordinator, "DecisionExecuted")
-        .withArgs(1n, AGENT_ID, "BUY", buyPrice, 1n);
+        .withArgs(1n, AGENT_ID, "BUY", buyPrice, 1n, anyValue);
 
       expect((await exchange.getActiveBuys()).length).to.equal(1);
     });
