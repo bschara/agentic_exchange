@@ -12,6 +12,7 @@ const AGENTS = [
   { envKey: 'MOMENTUM_TRADER_PK', name: 'Momentum-Alpha', strategy: 'momentum_trader' },
   { envKey: 'ARBITRAGE_AGENT_PK', name: 'Arb-Scanner', strategy: 'arbitrage_agent' },
   { envKey: 'RISK_MANAGER_PK', name: 'Risk-Shield', strategy: 'risk_manager' },
+  { envKey: 'NOISE_TRADER_PK', name: 'Noise-Bot', strategy: 'noise_trader' },
 ];
 
 async function main() {
