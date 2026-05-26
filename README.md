@@ -240,19 +240,26 @@ npx hardhat run scripts/seed.js --network somnia
 
 ### Step 5 — Configure backend and restart
 
-Copy the printed env vars from deploy.js into `backend/.env`:
+Copy the printed env vars from deploy.js into `backend/.env`. `AGENT_TOKEN_ADDRESS` and all other contract addresses are **auto-loaded from `somnia-testnet.json`** if you leave them as placeholders — you only need the wallet keys and RPC settings:
 
 ```
-AGENT_TOKEN_ADDRESS=0x...
-EXCHANGE_ADDRESS=0x...
-AGENT_REGISTRY_ADDRESS=0x...
-TREASURY_ADDRESS=0x...
-AGENT_COORDINATOR_ADDRESS=0x...
+SOMNIA_RPC_URL=https://dream-rpc.somnia.network
+SOMNIA_CHAIN_ID=50312
+SOMNIA_BLOCK_MS=400
+DEPLOYER_PRIVATE_KEY=0x...
 MARKET_MAKER_PK=0x...
 MOMENTUM_TRADER_PK=0x...
 ARBITRAGE_AGENT_PK=0x...
 RISK_MANAGER_PK=0x...
 NOISE_TRADER_PK=0x...
+```
+
+### Step 6 — Configure frontend
+
+Set the deployer's public address in `frontend/.env.local` (required to show admin controls):
+
+```
+NEXT_PUBLIC_DEPLOYER_ADDRESS=0xYourDeployerAddress
 ```
 
 Then restart:
@@ -294,7 +301,8 @@ somnia_hackathon/
 │   │   │                        # winStreak: adaptive order sizing (1+streak/5, cap 5×)
 │   │   │                        # _coalitionCount: CoalitionFormed when 3 agents agree
 │   │   │                        # approveToken(): grants Exchange spending allowance
-│   │   ├── AgentRegistry.sol    # agent registration + reputation
+│   │   │                        # pauseAgent()/resumeAgent(): owner pause/resume per agent
+│   │   ├── AgentRegistry.sol    # agent registration + reputation + setActive()
 │   │   ├── Treasury.sol         # per-agent balances
 │   │   └── MockPlatform.sol     # local dev: simulates Somnia platform callbacks
 │   ├── scripts/
@@ -326,11 +334,14 @@ somnia_hackathon/
 │   ├── blockchain/
 │   │   ├── client.py            # Web3 singleton, per-wallet nonce Lock, send_transaction()
 │   │   └── contracts.py         # typed wrappers: ExchangeContract, TreasuryContract,
-│   │                            # AgentCoordinatorContract, AgentRegistryContract
+│   │                            # AgentCoordinatorContract, AgentRegistryContract, AgentTokenContract
 │   ├── api/
 │   │   ├── websocket_hub.py     # ConnectionManager: broadcast to all clients
 │   │   ├── routes_ws.py         # /ws WebSocket endpoint
-│   │   └── routes_http.py       # REST endpoints (/health, /state, /agents, /chain-metrics, /events/inject)
+│   │   ├── auth.py              # MetaMask wallet-signature auth (personal_sign + eth_account recovery)
+│   │   └── routes_http.py       # REST endpoints (/health, /state, /agents, /chain-metrics,
+│   │                            # /events/inject, /agents/{id}/pause, /agents/{id}/resume,
+│   │                            # /agents/{id}/fund, /agents/pause-all, /agents/resume-all, /agents/fund-all)
 │   └── tests/
 │       ├── test_order_book.py   # in-memory order book: placement, matching, cancellation
 │       ├── test_price_engine.py # GBM tick, shock, volatility multiplier, OHLCV builder
@@ -361,7 +372,10 @@ somnia_hackathon/
     │   ├── agentStore.ts        # Zustand: per-agent state, coordinator balance, coalition alerts
     │   └── feedStore.ts         # Zustand: activity feed ring buffer (max 100)
     ├── hooks/
-    │   └── useWebSocket.ts      # WS connect/reconnect + message dispatch to stores
+    │   ├── useWebSocket.ts      # WS connect/reconnect + message dispatch to stores
+    │   └── useAdminActions.ts   # wallet connect (MetaMask), sign-and-post for pause/resume/fund
+    ├── types/
+    │   └── global.d.ts          # EthereumProvider interface + window.ethereum type extension
     └── lib/
         ├── types.ts             # shared TypeScript types (AgentState, Candle, OrderBookLevel, …)
         └── utils.ts             # shadcn cn() helper
@@ -394,6 +408,10 @@ somnia_hackathon/
 | Agent cards show zeros after redeploy            | `backend/.env` has stale contract addresses      | Copy addresses printed by `deploy-local.js` into `backend/.env`, or delete the address lines — `_load_local_deployment()` auto-loads from `somnia-local.json` when running against localhost      |
 | Noise trader gets "Insufficient balance" reverts | Noise trader wallet has no AGT tokens            | Fixed in current `deploy-local.js` (mints 10k AGT); if on an older deployment run `deploy-local.js` again or mint AGT manually to the noise trader wallet                                         |
 | Daemon shows `NONCE_EXPIRED` / "nonce too low"   | Another process used the same deployer key       | Restart the daemon (`Ctrl+C` → `node scripts/platform-daemon.js`) so its `NonceManager` re-fetches the current nonce; ensure no other process signs with the deployer key while daemon is running |
+| AGT balance shows 0 for all agents               | On-chain agents hold AGT in the coordinator, not their wallets | Expected — coordinator holds the shared 10M pool. Dashboard now shows coordinator's AGT balance for on-chain agents |
+| P&L / orders show 0 for on-chain agents          | AgentCoordinator is `msg.sender` for Exchange, not individual wallets | Fixed — backend now tracks `DecisionExecuted.orderId → agentId` via `_order_to_agent` mapping |
+| Admin control buttons (PAUSE ALL etc.) not visible | Deployer wallet not connected or address mismatch | Click CONNECT WALLET in the header; ensure `NEXT_PUBLIC_DEPLOYER_ADDRESS` matches the deployer public key |
+| `POST /agents/{id}/pause` returns 403            | Missing or invalid MetaMask signature headers    | Admin endpoints require a `personal_sign` signature; use the dashboard PAUSE/RESUME buttons or sign manually |
 
 ---
 

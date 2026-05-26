@@ -33,7 +33,10 @@ frontend/
 │   ├── agentStore.ts        # Zustand: agent states, decision history, coordinator metrics
 │   └── feedStore.ts         # Zustand: activity feed items
 ├── hooks/
-│   └── useWebSocket.ts      # WS connect/reconnect, message dispatch, injectEvent()
+│   ├── useWebSocket.ts      # WS connect/reconnect, message dispatch, injectEvent()
+│   └── useAdminActions.ts   # Wallet connect + MetaMask personal_sign for admin actions
+├── types/
+│   └── global.d.ts          # EthereumProvider interface + window.ethereum type declaration
 ├── lib/
 │   ├── types.ts             # All TypeScript interfaces (CandleData, AgentState, ChainMetrics, etc.)
 │   └── utils.ts             # cn() helper for className merging
@@ -56,11 +59,12 @@ The dashboard renders with zeroed-out defaults until the WebSocket connects and 
 
 ### Environment Variables (`.env.local`)
 
-| Variable                      | Default                                   | Purpose                    |
-| ----------------------------- | ----------------------------------------- | -------------------------- |
-| `NEXT_PUBLIC_WS_URL`          | `ws://localhost:8000/ws`                  | Backend WebSocket endpoint |
-| `NEXT_PUBLIC_API_URL`         | `http://localhost:8000`                   | Backend HTTP base URL      |
-| `NEXT_PUBLIC_SOMNIA_EXPLORER` | `https://shannon-explorer.somnia.network` | Base URL for tx hash links |
+| Variable                        | Default                                   | Purpose                                                                                               |
+| ------------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_WS_URL`            | `ws://localhost:8000/ws`                  | Backend WebSocket endpoint                                                                            |
+| `NEXT_PUBLIC_API_URL`           | `http://localhost:8000`                   | Backend HTTP base URL                                                                                 |
+| `NEXT_PUBLIC_SOMNIA_EXPLORER`   | `https://shannon-explorer.somnia.network` | Base URL for tx hash links                                                                            |
+| `NEXT_PUBLIC_DEPLOYER_ADDRESS`  | `` (empty)                               | Deployer's public address; when a connected wallet matches this, admin controls become visible in the Header |
 
 ---
 
@@ -123,13 +127,37 @@ Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. S
 
 ---
 
+## Admin Actions (`hooks/useAdminActions.ts`)
+
+Handles MetaMask wallet connection and signed admin API calls.
+
+**`connectWallet() → string`** — calls `window.ethereum.request({ method: 'eth_requestAccounts' })`, returns the connected address.
+
+**`isOwnerAddress(address: string) → boolean`** — returns true when `address.toLowerCase() === NEXT_PUBLIC_DEPLOYER_ADDRESS.toLowerCase()`. Used by Header to gate the admin control panel.
+
+**`signAndPost(address, action, url, body?)`** — internal helper:
+1. Builds message: `"admin:<action>:<unix_timestamp>"`
+2. Calls `window.ethereum.request({ method: 'personal_sign', params: [message, address] })`
+3. POSTs to `${API_URL}${url}` with headers `X-Admin-Sig`, `X-Admin-Message`, `X-Admin-Address`
+
+**`pauseAll(address)`** / **`resumeAll(address)`** / **`fundAll(address, amount)`** — thin wrappers over `signAndPost` targeting the corresponding backend endpoints.
+
+**`global.d.ts`** declares the `EthereumProvider` interface (`request()`, `on()`, `removeListener()`, `isMetaMask`) and extends `Window` with `ethereum?: EthereumProvider`, giving the TypeScript compiler a typed `window.ethereum`.
+
+---
+
 ## Component Reference
 
 ### `Header.tsx`
 
 - Reads: `marketStore.currentPrice`, `marketStore.isConnected`, `marketStore.priceChange24h`, `marketStore.volume24h`
-- Uses: `useWebSocket().injectEvent`
+- Uses: `useWebSocket().injectEvent`, `useAdminActions`
 - 5 event buttons (WHALE BUY, WHALE SELL, VOL SPIKE, NEWS EVENT, FLASH CRASH) each with a 10s cooldown after click (shows "INJECTING..." and disables)
+- **Admin controls** (visible only when deployer wallet is connected):
+  - **CONNECT WALLET** button — calls `connectWallet()` via `window.ethereum.request({ method: 'eth_requestAccounts' })`; shows wallet address on success
+  - **PAUSE ALL** / **RESUME ALL** — calls `signAndPost()` with action `"pause-all"` / `"resume-all"`; signs a timestamped message via MetaMask
+  - **FUND ALL** — input field for AGT amount + button; calls `signAndPost()` with action `"fund-all"` and body `{ amount }`
+  - All admin buttons share an `adminLoading` state that disables them during in-flight requests
 
 ### `LatencyHero.tsx`
 
@@ -172,7 +200,7 @@ Connection managed in `hooks/useWebSocket.ts`. Auto-reconnects 3s after close. S
 - Props: `agent: AgentState`
 - Per-agent color coding: market_maker=blue, momentum_trader=emerald, arbitrage_agent=violet, risk_manager=yellow, noise_trader=pink
 - Strategy description line rendered below agent name (e.g. "Posts bid AND ask simultaneously. Profits from the spread.")
-- Stats: decisions total, BUY/SELL/HOLD counts, treasury balance, **net position** (LONG/SHORT/FLAT badge)
+- Stats: decisions total, BUY/SELL/HOLD counts, **AGT balance** (`agt_balance` — coordinator's pool for on-chain agents, individual wallet for noise_trader), **net position** (LONG/SHORT/FLAT badge)
 - Last decision + price shown in header
 - Contains `ReasoningPanel` and `AgentStatusBadge`
 
