@@ -277,7 +277,7 @@ Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-trigg
 | `triggerWithPrice(string agentId, uint256 rawPrice)` | owner | Skips the JSON API fetch and fires the LLM request directly with a caller-supplied price. Used by the backend watchdog. |
 | `handlePriceData(requestId, responses, status, ...)` | platform only | **Step 2 callback.** Decodes fetched price, builds context string (price + peer signals + win streak) via `_buildContext()`, fires LLM inference. |
 | `handleDecision(requestId, responses, status, ...)` | platform only | **Step 3 callback.** Cancels `lastOrderId[agentId]`. Market Maker: places both bid (−0.1%) and ask (+0.1%), returns. Directional agents: decodes BUY/SELL/HOLD, stores `lastDecision[agentId]`, checks `_coalitionCount()` (fires `_fireCoalitionOrder()` if == 3), places order via `_orderAmount()`, updates `winStreak`. Calls `_retrigger()`. |
-| `_retrigger(agentId)` | internal | Checks balance ≥ `deposit × 2`, fires next JSON API fetch, or emits `LoopStopped`. |
+| `_retrigger(agentId)` | internal | Checks `agentPaused[agentId]` first — if paused, emits `LoopStopped(agentId, "paused", ...)` and returns without consuming a deposit. Otherwise checks balance ≥ `deposit × 2`, fires next JSON API fetch, or emits `LoopStopped`. |
 | `_buildContext(fetchedPrice, agentId)` | internal view | Builds the full LLM prompt: price, last fill, bid/ask, peer signals (`_buildPeerSignals()`), win streak info. Emitted on-chain in `LLMRequestFired.context`. |
 | `_buildPeerSignals(excludeId)` | internal view | Returns `"agentId=DECISION,..."` for all peers with a recorded `lastDecision`, excluding self and market_maker (non-directional). Returns `"none"` if no peers have decided yet. |
 | `_orderAmount(agentId)` | internal view | Returns `ORDER_AMOUNT_BASE × (1 + winStreak/5)`, capped at `ORDER_AMOUNT_MAX`. |
@@ -288,6 +288,9 @@ Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-trigg
 | `setLlmAgentId(uint256 id)` | owner | Updates the Somnia platform LLM agent ID |
 | `setJsonApiAgentId(uint256 id)` | owner | Updates the Somnia platform JSON API agent ID |
 | `approveToken(address _token, address spender, uint256 amount)` | owner | Calls `ERC20.approve(spender, amount)` from the coordinator's address — used once after deploy to grant Exchange a max allowance over the coordinator's AGT pool |
+| `pauseAgent(string calldata agentId)` | owner | Sets `agentPaused[agentId] = true`; `_retrigger()` will emit `LoopStopped` instead of re-triggering, halting the self-loop without consuming additional STT deposits |
+| `resumeAgent(string calldata agentId)` | owner | Sets `agentPaused[agentId] = false`; Python must then call `triggerAgentDecision()` once to restart the loop |
+| `agentPaused(string)` | public view | Returns the pause state for a given agent ID |
 | `fund()` | anyone (payable) | Adds STT to coordinator balance for inference deposits |
 | `withdraw()` | owner | Withdraws all coordinator STT balance |
 
@@ -320,6 +323,9 @@ event LoopStopped(string agentId, string reason, uint256 balance);
 
 // Fires when _coalitionCount(direction) == 3 — exactly once per convergence event
 event CoalitionFormed(string direction, uint256 agentCount, uint256 price, uint256 orderId);
+
+event AgentPaused(string agentId);
+event AgentResumed(string agentId);
 ```
 
 `LoopStopped` fires when `_retrigger()` cannot proceed — either because the coordinator's STT balance is below `deposit × 2`, or because no `agentConfig` is registered for that agent ID. Monitor this event to know when to top up via `fund()`.
@@ -362,6 +368,7 @@ struct AgentInfo {
 | `register(address agent, string name, string strategy)` | `onlyOwner` | Registers agent, sets initial reputation to 100 |
 | `updateReputation(address agent, int256 delta)` | `onlyOwner` | Adds delta to reputation (can be negative) |
 | `incrementTrades(address agent)` | `onlyOwner` | Increments `tradesExecuted` counter |
+| `setActive(address agent, bool active)` | `onlyOwner` | Updates the `active` field on the agent's `AgentInfo` struct; emits `AgentActiveUpdated` |
 | `getAgent(address agent)` | view | Returns full `AgentInfo` struct |
 | `getAllAgents()` | view | Returns array of all registered agent addresses |
 | `isRegistered(address agent)` | view | Returns bool |
@@ -371,6 +378,7 @@ struct AgentInfo {
 ```solidity
 event AgentRegistered(address indexed agent, string name, string strategy);
 event ReputationUpdated(address indexed agent, int256 delta, int256 newReputation);
+event AgentActiveUpdated(address indexed agent, bool active);
 ```
 
 ---

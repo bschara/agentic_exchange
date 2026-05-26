@@ -104,16 +104,18 @@ Reads `MarketStateBus.get_snapshot()` and broadcasts a `market_snapshot` WS mess
 
 Reads on-chain contract state and emits a `chain_metrics` WS message. Also available at `GET /chain-metrics`. Tracks:
 
-| Source                           | Data collected                                                                                                                                                                                                  |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AgentCoordinator` events        | Per-agent: `decisions_total`, `buy_count`, `sell_count`, `hold_count`, `failures`, `last_decision`, `last_price`, `last_fetched_price`, `last_context` (full LLM prompt), `win_streak`, `loop_stopped` + reason |
-| `CoalitionFormed` events         | `coalition_alert` top-level field; also broadcast immediately as `{ type: "coalition_alert" }` WS message; inserted into `recent_fills` with `category: "coalition"`                                            |
-| `AgentCoordinator.getBalance()`  | Coordinator STT fuel remaining                                                                                                                                                                                  |
-| `Exchange.getActiveBuys/Sells()` | Live order book depth (buy count, sell count)                                                                                                                                                                   |
-| `Exchange.getBestBid/Ask()`      | Live spread %                                                                                                                                                                                                   |
-| `Exchange.OrderPlaced` events    | Per-agent orders placed count (matched to wallet addresses)                                                                                                                                                     |
-| `Treasury.getBalance(addr)`      | Per-agent treasury STT balance                                                                                                                                                                                  |
-| `Treasury.totalLocked()`         | Total STT held by treasury contract                                                                                                                                                                             |
+| Source                                 | Data collected                                                                                                                                                                                                  |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AgentCoordinator` events              | Per-agent: `decisions_total`, `buy_count`, `sell_count`, `hold_count`, `failures`, `orders_placed` (from `DecisionExecuted.orderId`), `last_decision`, `last_price`, `last_fetched_price`, `last_context`, `win_streak`, `loop_stopped` + reason, `paused` state |
+| `AgentPaused` / `AgentResumed` events  | Updates `orchestrator.paused_agents` set; `loop_stopped_any` ignores paused agents (normal shutdown vs real error) |
+| `CoalitionFormed` events               | `coalition_alert` top-level field; also broadcast immediately as `{ type: "coalition_alert" }` WS message; inserted into `recent_fills` with `category: "coalition"` |
+| `AgentCoordinator.getBalance()`        | Coordinator STT fuel remaining                                                                                                                                                                                  |
+| `AgentToken.balanceOf(coordinator)`    | AGT balance shown in agent cards — coordinator holds the shared pool for all 4 on-chain agents; noise_trader shows its own wallet balance |
+| `Exchange.getActiveBuys/Sells()`       | Live order book depth (buy count, sell count)                                                                                                                                                                   |
+| `Exchange.getBestBid/Ask()`            | Live spread %                                                                                                                                                                                                   |
+| `Exchange.OrderPlaced` events          | Orders placed count for noise_trader only (wallet-based) — on-chain agents are attributed via `DecisionExecuted` |
+| `Treasury.getBalance(addr)`            | Per-agent treasury STT balance                                                                                                                                                                                  |
+| `Treasury.totalLocked()`               | Total STT held by treasury contract                                                                                                                                                                             |
 
 The loop advances `from_block` after each poll so events are never double-counted.
 
@@ -479,15 +481,23 @@ Event types: `whale_buy`, `whale_sell`, `volatility_spike`, `news_event`, `flash
 
 ### HTTP Endpoints
 
-| Method | Path              | Response                                                                           |
-| ------ | ----------------- | ---------------------------------------------------------------------------------- |
-| `GET`  | `/health`         | `{ status, agents_running, ws_connections }`                                       |
-| `GET`  | `/state`          | Full market snapshot                                                               |
-| `GET`  | `/agents`         | Array of 5 agent state summaries from `chain_metrics`                              |
-| `GET`  | `/chain-metrics`  | Latest `chain_metrics` snapshot (coordinator balance, per-agent on-chain stats)    |
-| `POST` | `/events/inject`  | `{ event_type }` → triggers event                                                  |
-| `POST` | `/agents/trigger` | Re-fires `triggerAgentDecision()` for all 4 on-chain agents — use if loops stalled |
-| `GET`  | `/debug/config`   | Non-sensitive config values + whether `AgentCoordinator` is initialized            |
+| Method | Path                        | Auth       | Response                                                                              |
+| ------ | --------------------------- | ---------- | ------------------------------------------------------------------------------------- |
+| `GET`  | `/health`                   | —          | `{ status, agents_running, ws_connections }`                                          |
+| `GET`  | `/state`                    | —          | Full market snapshot                                                                  |
+| `GET`  | `/agents`                   | —          | Array of 5 agent state summaries from `chain_metrics`                                 |
+| `GET`  | `/chain-metrics`            | —          | Latest `chain_metrics` snapshot (coordinator balance, per-agent on-chain stats)       |
+| `POST` | `/events/inject`            | —          | `{ event_type }` → triggers event (simulated only, no blockchain call)                |
+| `POST` | `/agents/trigger`           | —          | Re-fires `triggerAgentDecision()` for all 4 on-chain agents — use if loops stalled   |
+| `GET`  | `/debug/config`             | —          | Non-sensitive config values + whether `AgentCoordinator` is initialized               |
+| `POST` | `/agents/{id}/pause`        | admin_auth | Calls `pauseAgent(agentId)` on-chain; loop stops at next `_retrigger()`               |
+| `POST` | `/agents/{id}/resume`       | admin_auth | Calls `resumeAgent(agentId)` then re-fires `triggerAgentDecision()` to restart loop  |
+| `POST` | `/agents/pause-all`         | admin_auth | Pauses all 4 on-chain agents                                                          |
+| `POST` | `/agents/resume-all`        | admin_auth | Resumes all 4 on-chain agents and restarts each loop                                  |
+| `POST` | `/agents/{id}/fund`         | admin_auth | Body: `{ amount: float }` — mints AGT to the agent                                    |
+| `POST` | `/agents/fund-all`          | admin_auth | Body: `{ amount: float }` — mints AGT to all on-chain agents                          |
+
+**`admin_auth`** dependency (`api/auth.py`): reads `X-Admin-Sig`, `X-Admin-Message`, `X-Admin-Address` HTTP headers. Verifies `personal_sign(message, address)` where `message = "admin:<action>:<unix_timestamp>"`. Signer must match `deployer_address` (derived from `DEPLOYER_PRIVATE_KEY` at startup). Requests older than 5 minutes are rejected.
 
 ---
 
@@ -563,3 +573,8 @@ MM-Prime / Momentum-Alpha / Arb-Scanner
 | **Ring buffers in frontend (max 200/100)**       | Prevents memory growth during extended demo sessions.                                                                                                                                                                                                                                                                                                                                          |
 | **`series.update()` only for chart**             | Calling `setData()` repeatedly on TradingView v5 causes visible flicker and memory leaks.                                                                                                                                                                                                                                                                                                      |
 | **`key={fillCount}` animation restart**          | `LatencyHero` passes a counter as `key` to the animated latency number — React remounts the element on each fill, restarting the CSS `animate-pulse` as a visual "new trade settled" pop.                                                                                                                                                                                                      |
+| **`_order_to_agent` dict for trade attribution** | `AgentCoordinator` is `msg.sender` for all `Exchange.placeOrder()` calls — individual agent wallets never appear in `OrderPlaced.agent`. `DecisionExecuted` carries both `agentId` and `orderId`, so the backend builds `{order_id → agent_id}` from these events and uses it as fallback when the wallet lookup fails. This gives on-chain agents correct order counts and P&L attribution.   |
+| **`DecisionExecuted` poll in 1s trade loop**     | `DecisionExecuted` and `TradeExecuted` can fire in the same block (placeOrder auto-matches). The 5s metrics loop hasn't processed `DecisionExecuted` yet when the 1s trade loop tries to attribute a trade. `get_decision_executed_events()` (targeted single-event poll) runs at the top of every 1s iteration to keep `_order_to_agent` current before trade processing.                     |
+| **AGT balance from coordinator**                 | On-chain agents hold no AGT in individual wallets — the coordinator holds a shared 10M pool approved for Exchange. The backend polls `AgentToken.balanceOf(coordinator_address)` and shows that number for all 4 on-chain agents. Noise_trader shows its own wallet balance (individual 1M from `seed.js`).                                                                                     |
+| **`pauseAgent`/`resumeAgent` for STT conservation** | `_retrigger()` checks `agentPaused[agentId]` on-chain before consuming a deposit. When paused it emits `LoopStopped(agentId, "paused", ...)` and returns without spending STT. Python observes `AgentPaused` events and updates `orchestrator.paused_agents` so the watchdog doesn't re-trigger. `loop_stopped_any` ignores "paused" reasons so the UI warning only fires for genuine fund exhaustion. |
+| **Wallet signature auth for admin endpoints**    | `personal_sign(message, address)` with a timestamped message means MetaMask prompts the user visibly, the signature is tied to the deployer key, and replayed signatures expire after 5 minutes. The deployer address is derived server-side from `DEPLOYER_PRIVATE_KEY` — not stored separately in env. Frontend admin controls only appear when the connected wallet address matches `NEXT_PUBLIC_DEPLOYER_ADDRESS`. |

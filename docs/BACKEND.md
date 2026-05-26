@@ -20,11 +20,15 @@ backend/
 │   └── state_bus.py         # Async-safe shared state: price, order book, warnings, events
 ├── blockchain/
 │   ├── client.py            # Web3 singleton, per-wallet nonce Lock, send_transaction()
-│   └── contracts.py         # Typed wrappers: ExchangeContract, TreasuryContract, AgentCoordinatorContract
+│   └── contracts.py         # Typed wrappers: ExchangeContract, TreasuryContract,
+│                            # AgentCoordinatorContract, AgentRegistryContract, AgentTokenContract
 └── api/
     ├── websocket_hub.py     # ConnectionManager: broadcast() to all WS clients
     ├── routes_ws.py         # /ws WebSocket endpoint + message dispatch
-    └── routes_http.py       # REST endpoints (health, state, agents, chain-metrics, events, trigger, debug)
+    ├── auth.py              # MetaMask wallet-signature auth: verify_admin_signature() + admin_auth FastAPI dep
+    └── routes_http.py       # REST endpoints (health, state, agents, chain-metrics, events, trigger,
+                             # agents/{id}/pause, agents/{id}/resume, agents/{id}/fund,
+                             # agents/pause-all, agents/resume-all, agents/fund-all)
 ```
 
 ---
@@ -73,8 +77,13 @@ All settings live in `config.py` (Pydantic Settings) and are loaded from `backen
 | `INITIAL_PRICE`             | `3500.0`                           | No        | Starting price for GBM chart (until real trades come in)                                                                               |
 | `SOMNIA_BLOCK_MS`           | `0`                                | No        | Somnia block time in ms — used to compute `avg_decision_latency_ms`. Set to `400` for testnet, `0` for local Hardhat (instant blocks). |
 | `FRONTEND_URL`              | `http://localhost:3000`            | No        | Allowed CORS origin                                                                                                                    |
+| `SOMNIA_BLOCK_MS`           | `0`                                | No        | Somnia block time in ms — used to compute `avg_decision_latency_ms`. Set to `400` for testnet, `0` for local Hardhat (instant blocks). |
 
 \* **Local dev auto-load:** if `SOMNIA_RPC_URL` points to localhost and addresses/PKs are placeholder zeros, `_load_local_deployment()` automatically reads `contracts/deployments/somnia-local.json` (written by `deploy-local.js`) and injects the real values at startup. You only need to set `SOMNIA_RPC_URL=http://127.0.0.1:8545` in `.env`.
+
+**Testnet auto-load:** `_load_local_deployment()` also reads `contracts/deployments/somnia-testnet.json` when pointing at testnet. Contract addresses (including `AGENT_TOKEN_ADDRESS`) are injected automatically — you only need the wallet private keys in `.env`.
+
+**`deployer_address`** is not an env var — it is derived at startup from `DEPLOYER_PRIVATE_KEY` via `Account.from_key().address`. The admin auth middleware compares incoming wallet addresses against this derived value.
 
 **Contracts activate automatically** when addresses in `.env` are valid 20-byte hex strings (not placeholders). On startup the orchestrator fires one `triggerAgentDecision()` per agent; after that the contract self-re-triggers and Python never touches the contracts again.
 
@@ -123,7 +132,11 @@ When `_coordinator` is set, it additionally fires one `triggerAgentDecision()` p
       "sell_count": int,
       "hold_count": int,
       "failures": int,                # DecisionFailed events
-      "orders_placed": int,           # OrderPlaced events from this agent's wallet
+      "orders_placed": int,           # DecisionExecuted events with a non-zero orderId (on-chain agents)
+                                      # or OrderPlaced events from wallet (noise_trader)
+      "agt_balance": float,           # AGT token balance — coordinator's balance for on-chain agents,
+                                      # individual wallet balance for noise_trader
+      "paused": bool,                 # true if pauseAgent() was called and loop is halted
       "treasury_balance": float,      # Treasury.getBalance(wallet) in ETH
       "last_decision": str,           # "BUY" | "SELL" | "HOLD" | null
       "last_price": float,            # price from last DecisionExecuted
@@ -206,7 +219,21 @@ ABI loading strategy: tries `contracts/deployments/somnia-testnet.json` first (d
 
 - `trigger_decision(agent_pk, agent_id)` → ABI-encodes `triggerAgentDecision(agentId)`, submits signed tx from the agent's wallet. Called once per agent at startup by `orchestrator.start_all()`. After this the contract self-loops.
 - `get_balance()` → reads the coordinator's STT balance (must stay funded; each cycle costs 2 deposits)
-- `get_coordinator_events(from_block)` → polls `DecisionExecuted`, `DecisionFailed`, `LoopStopped`, `LLMRequestFired` events in one pass, returns them sorted by block number
+- `get_coordinator_events(from_block)` → polls `DecisionExecuted`, `DecisionFailed`, `LoopStopped`, `LLMRequestFired`, `AgentPaused`, `AgentResumed` events in one pass, returns them sorted by block number
+- `get_decision_executed_events(from_block)` → targeted single-event poll for `DecisionExecuted` only; called at the top of each 1s trade loop iteration to populate `_order_to_agent` before trade attribution
+- `pause_agent(deployer_pk, agent_id)` → calls `pauseAgent(agentId)` on-chain
+- `resume_agent(deployer_pk, agent_id)` → calls `resumeAgent(agentId)` on-chain
+- `is_paused(agent_id) -> bool` → view call to `agentPaused[agentId]`
+
+**`AgentTokenContract`** — wraps `AgentToken.sol`:
+
+- `mint(deployer_pk, to_address, amount_agt)` → mints AGT to any address (owner-only on-chain)
+- `get_balance(address) -> float` → `balanceOf(address)` scaled from wei
+- `get_total_supply() -> float` → `totalSupply()` scaled from wei
+
+**`AgentRegistryContract`** — wraps `AgentRegistry.sol`:
+
+- `set_active(deployer_pk, agent_address, active)` → calls `setActive(agent, active)` on-chain
 
 **`ExchangeContract`** methods:
 
@@ -245,15 +272,23 @@ ABI loading strategy: tries `contracts/deployments/somnia-testnet.json` first (d
 
 ### HTTP Endpoints
 
-| Method | Path              | Description                                                                                          |
-| ------ | ----------------- | ---------------------------------------------------------------------------------------------------- |
-| `GET`  | `/health`         | `{ status, agents_running, ws_connections }`                                                         |
-| `GET`  | `/state`          | Full market snapshot from `MarketStateBus`                                                           |
-| `GET`  | `/agents`         | Array of 5 agent state summaries from `chain_metrics`                                                |
-| `GET`  | `/chain-metrics`  | Latest `chain_metrics` snapshot (live coordinator/exchange/treasury state)                           |
-| `POST` | `/events/inject`  | Body: `{ "event_type": "...", "params": {} }`                                                        |
-| `POST` | `/agents/trigger` | Re-fires `triggerAgentDecision()` for all 4 on-chain agents; returns per-agent tx hashes or errors   |
-| `GET`  | `/debug/config`   | Non-sensitive settings + `coordinator_initialized` flag — useful for diagnosing misconfigured `.env` |
+| Method | Path                        | Auth      | Description                                                                                          |
+| ------ | --------------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
+| `GET`  | `/health`                   | —         | `{ status, agents_running, ws_connections }`                                                         |
+| `GET`  | `/state`                    | —         | Full market snapshot from `MarketStateBus`                                                           |
+| `GET`  | `/agents`                   | —         | Array of 5 agent state summaries from `chain_metrics`                                                |
+| `GET`  | `/chain-metrics`            | —         | Latest `chain_metrics` snapshot (live coordinator/exchange/treasury state)                           |
+| `POST` | `/events/inject`            | —         | Body: `{ "event_type": "...", "params": {} }`                                                        |
+| `POST` | `/agents/trigger`           | —         | Re-fires `triggerAgentDecision()` for all 4 on-chain agents; returns per-agent tx hashes or errors   |
+| `GET`  | `/debug/config`             | —         | Non-sensitive settings + `coordinator_initialized` flag — useful for diagnosing misconfigured `.env` |
+| `POST` | `/agents/{agent_id}/pause`  | admin_auth | Calls `coordinator.pause_agent(deployer_pk, agent_id)`; loop stops at next `_retrigger()` call       |
+| `POST` | `/agents/{agent_id}/resume` | admin_auth | Calls `coordinator.resume_agent(deployer_pk, agent_id)` then re-fires `trigger_decision()` to restart |
+| `POST` | `/agents/pause-all`         | admin_auth | Pauses all 4 on-chain agents in sequence                                                             |
+| `POST` | `/agents/resume-all`        | admin_auth | Resumes all 4 on-chain agents and restarts each loop                                                 |
+| `POST` | `/agents/{agent_id}/fund`   | admin_auth | Body: `{ "amount": float }` — mints AGT to the agent (or coordinator for on-chain agents)            |
+| `POST` | `/agents/fund-all`          | admin_auth | Body: `{ "amount": float }` — mints AGT to all on-chain agents (via coordinator)                     |
+
+**Admin auth** (`admin_auth` FastAPI dependency in `api/auth.py`): reads `X-Admin-Sig`, `X-Admin-Message`, `X-Admin-Address` headers. Message format: `"admin:<action>:<unix_timestamp>"`. Recovers the signer via `eth_account.Account.recover_message()` and compares against `settings.deployer_address`. Requests older than 5 minutes are rejected to prevent replay attacks. Returns HTTP 403 on any mismatch.
 
 ---
 
@@ -299,3 +334,7 @@ Set `INITIAL_PRICE` and `PRICE_VOLATILITY` in `backend/.env`. Volatility (`σ`) 
 | Hardcoded 6 gwei gas                  | `eth_gasPrice` RPC returns unreliable values on Somnia testnet; hardcoding avoids tx failures.                                                                                |
 | 30s receipt timeout (not infinite)    | A stuck startup trigger should never block the orchestrator — log and continue.                                                                                               |
 | Agents stagger 1s at startup          | Spreads the burst of `triggerAgentDecision()` transactions to avoid nonce collisions during the initial on-chain kickoff.                                                     |
+| `_order_to_agent` dict for attribution | `AgentCoordinator` is `msg.sender` for all `Exchange.placeOrder()` calls — individual agent wallets never appear in `OrderPlaced`. `DecisionExecuted` carries both `agentId` and `orderId`, so the backend builds a `{order_id → agent_id}` map from these events and uses it as a fallback in `_trade_event_poll_loop` when the wallet lookup returns nothing. |
+| `get_decision_executed_events` in trade loop | `DecisionExecuted` and `TradeExecuted` can fire in the same block (order auto-matches on placement). The 5s metrics loop might not have processed `DecisionExecuted` yet when the 1s trade loop tries to attribute a trade. Polling `DecisionExecuted` at the top of each 1s iteration keeps `_order_to_agent` current. |
+| AGT balance from coordinator           | On-chain agents hold no AGT in their own wallets — the coordinator holds a shared 10M pool. `_collect_chain_metrics` polls `AgentToken.balanceOf(coordinator_address)` and assigns the coordinator's balance to all 4 on-chain agents. Only `noise_trader` gets its own wallet balance. |
+| Wallet signature auth (admin_auth)    | Admin endpoints (pause/resume/fund) require a `personal_sign` MetaMask signature with a timestamped message. The deployer address is derived server-side from `DEPLOYER_PRIVATE_KEY` — never stored in env as a config value — and the signature is verified on every request. 5-minute window prevents replay. |
