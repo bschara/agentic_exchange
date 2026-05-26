@@ -102,6 +102,9 @@ contract AgentCoordinator {
     // Consecutive filled-order streak per agent — drives _orderAmount()
     mapping(string => uint256) public winStreak;
 
+    // Pause flags — owner can halt an agent's self-retriggering loop to save STT
+    mapping(string => bool) public agentPaused;
+
     // Ordered list of configured agent IDs — iterated for peer signals + coalition
     string[] private _agentIdList;
 
@@ -127,6 +130,8 @@ contract AgentCoordinator {
 
     // ── Events ───────────────────────────────────────────────────────────────────
 
+    event AgentPaused(string agentId);
+    event AgentResumed(string agentId);
     event DecisionTriggered(uint256 indexed requestId, string agentId);
     event PriceFetchFailed(uint256 indexed requestId, string agentId);
 
@@ -200,6 +205,16 @@ contract AgentCoordinator {
 
     function setJsonApiAgentId(uint256 agentId) external onlyOwner {
         jsonApiAgentId = agentId;
+    }
+
+    function pauseAgent(string calldata agentId) external onlyOwner {
+        agentPaused[agentId] = true;
+        emit AgentPaused(agentId);
+    }
+
+    function resumeAgent(string calldata agentId) external onlyOwner {
+        agentPaused[agentId] = false;
+        emit AgentResumed(agentId);
     }
 
     function fund() external payable {}
@@ -391,6 +406,11 @@ contract AgentCoordinator {
 
     // ── Self-re-trigger — keeps the agent loop running without any off-chain call ─
     function _retrigger(string memory agentId) internal {
+        if (agentPaused[agentId]) {
+            emit LoopStopped(agentId, "paused", address(this).balance);
+            return;
+        }
+
         AgentConfig memory cfg = agentConfigs[agentId];
         uint256 needed = platform.getRequestDeposit() * 2;
 

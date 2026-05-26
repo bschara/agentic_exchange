@@ -46,6 +46,7 @@ export interface AgentState {
   failures: number;
   orders_placed: number;
   treasury_balance: number;
+  agt_balance: number;
   last_decision: 'BUY' | 'SELL' | 'HOLD' | null;
   last_price: number;
   last_fetched_price: number;

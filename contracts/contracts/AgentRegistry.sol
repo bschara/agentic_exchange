@@ -19,6 +19,7 @@ contract AgentRegistry {
 
     event AgentRegistered(address indexed agent, string name, string strategy);
     event ReputationUpdated(address indexed agent, int256 delta, int256 newReputation);
+    event AgentActiveUpdated(address indexed agent, bool active);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
@@ -56,6 +57,12 @@ contract AgentRegistry {
         require(registered[agent], "Not registered");
         agents[agent].reputation += delta;
         emit ReputationUpdated(agent, delta, agents[agent].reputation);
+    }
+
+    function setActive(address agent, bool active) external onlyOwner {
+        require(registered[agent], "Not registered");
+        agents[agent].active = active;
+        emit AgentActiveUpdated(agent, active);
     }
 
     function incrementTrades(address agent) external onlyOwner {
