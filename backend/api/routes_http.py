@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from api.auth import admin_auth
 from config import settings
 
 router = APIRouter()
@@ -20,6 +21,10 @@ def init_http_routes(hub, orchestrator, state_bus):
 class InjectEventRequest(BaseModel):
     event_type: str
     params: dict = {}
+
+
+class FundAgentRequest(BaseModel):
+    amount: float
 
 
 @router.get("/health")
@@ -108,3 +113,164 @@ async def trigger_all_agents():
             results[cfg["id"]] = {"ok": False, "error": str(e)}
 
     return {"ok": True, "results": results}
+
+
+_ON_CHAIN_AGENTS = ["market_maker", "momentum_trader", "arbitrage_agent", "risk_manager"]
+
+
+@router.post("/agents/{agent_id}/pause", dependencies=[Depends(admin_auth)])
+async def pause_agent(agent_id: str):
+    """Pause an agent's on-chain self-retrigger loop to conserve STT tokens."""
+    if not _orchestrator or not _orchestrator._coordinator:
+        raise HTTPException(status_code=503, detail="AgentCoordinator not initialized")
+    if agent_id not in _ON_CHAIN_AGENTS:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+
+    result = await _orchestrator._coordinator.pause_agent(settings.deployer_private_key, agent_id)
+    _orchestrator.paused_agents.add(agent_id)
+
+    agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
+    if agent_wallet and _orchestrator._registry:
+        try:
+            await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, False)
+        except Exception:
+            pass
+
+    return {"status": "paused", "agent_id": agent_id, "tx": result.get("tx_hash")}
+
+
+@router.post("/agents/{agent_id}/resume", dependencies=[Depends(admin_auth)])
+async def resume_agent(agent_id: str):
+    """Resume a paused agent — clears the pause flag and fires a fresh trigger."""
+    if not _orchestrator or not _orchestrator._coordinator:
+        raise HTTPException(status_code=503, detail="AgentCoordinator not initialized")
+    if agent_id not in _ON_CHAIN_AGENTS:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+
+    resume_result = await _orchestrator._coordinator.resume_agent(settings.deployer_private_key, agent_id)
+    _orchestrator.paused_agents.discard(agent_id)
+
+    agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
+    if agent_wallet and _orchestrator._registry:
+        try:
+            await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, True)
+        except Exception:
+            pass
+
+    from agents.orchestrator import AGENT_CONFIGS
+    pk = next((getattr(settings, c["pk_key"]) for c in AGENT_CONFIGS if c["id"] == agent_id), settings.deployer_private_key)
+    trigger_result = await _orchestrator._coordinator.trigger_decision(agent_pk=pk, agent_id=agent_id)
+
+    return {
+        "status": "resumed",
+        "agent_id": agent_id,
+        "resume_tx": resume_result.get("tx_hash"),
+        "trigger_tx": trigger_result.get("tx_hash"),
+    }
+
+
+@router.post("/agents/pause-all", dependencies=[Depends(admin_auth)])
+async def pause_all_agents():
+    """Pause all 4 on-chain agents to stop spending STT tokens."""
+    if not _orchestrator or not _orchestrator._coordinator:
+        raise HTTPException(status_code=503, detail="AgentCoordinator not initialized")
+
+    results = {}
+    for agent_id in _ON_CHAIN_AGENTS:
+        try:
+            result = await _orchestrator._coordinator.pause_agent(settings.deployer_private_key, agent_id)
+            _orchestrator.paused_agents.add(agent_id)
+            agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
+            if agent_wallet and _orchestrator._registry:
+                try:
+                    await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, False)
+                except Exception:
+                    pass
+            results[agent_id] = {"ok": True, "tx": result.get("tx_hash")}
+        except Exception as e:
+            results[agent_id] = {"ok": False, "error": str(e)}
+
+    return {"status": "all_paused", "results": results}
+
+
+@router.post("/agents/resume-all", dependencies=[Depends(admin_auth)])
+async def resume_all_agents():
+    """Resume all 4 on-chain agents and fire fresh triggers for each."""
+    if not _orchestrator or not _orchestrator._coordinator:
+        raise HTTPException(status_code=503, detail="AgentCoordinator not initialized")
+
+    from agents.orchestrator import AGENT_CONFIGS
+    results = {}
+    for agent_id in _ON_CHAIN_AGENTS:
+        try:
+            await _orchestrator._coordinator.resume_agent(settings.deployer_private_key, agent_id)
+            _orchestrator.paused_agents.discard(agent_id)
+            agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
+            if agent_wallet and _orchestrator._registry:
+                try:
+                    await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, True)
+                except Exception:
+                    pass
+            pk = next((getattr(settings, c["pk_key"]) for c in AGENT_CONFIGS if c["id"] == agent_id), settings.deployer_private_key)
+            trigger = await _orchestrator._coordinator.trigger_decision(agent_pk=pk, agent_id=agent_id)
+            results[agent_id] = {"ok": True, "trigger_tx": trigger.get("tx_hash")}
+        except Exception as e:
+            results[agent_id] = {"ok": False, "error": str(e)}
+
+    return {"status": "all_resumed", "results": results}
+
+
+@router.post("/agents/{agent_id}/fund", dependencies=[Depends(admin_auth)])
+async def fund_agent(agent_id: str, req: FundAgentRequest):
+    """Mint AgentToken to an agent's wallet to fund sell-side order escrow."""
+    if not _orchestrator:
+        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
+    if not _orchestrator._agent_token:
+        raise HTTPException(status_code=503, detail="AgentToken contract not initialized — set AGENT_TOKEN_ADDRESS")
+    if agent_id not in _orchestrator.agents:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+
+    agent_wallet = _orchestrator.agents[agent_id]["wallet_address"]
+    result = await _orchestrator._agent_token.mint(
+        deployer_pk=settings.deployer_private_key,
+        agent_address=agent_wallet,
+        amount_tokens=req.amount,
+    )
+    return {
+        "status": "funded",
+        "agent_id": agent_id,
+        "agent_wallet": agent_wallet,
+        "amount": req.amount,
+        "tx": result.get("tx_hash"),
+    }
+
+
+@router.post("/agents/fund-all", dependencies=[Depends(admin_auth)])
+async def fund_all_agents(req: FundAgentRequest):
+    """Mint `amount` AGT tokens to all 4 on-chain agent wallets."""
+    if not _orchestrator:
+        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
+    if not _orchestrator._agent_token:
+        raise HTTPException(status_code=503, detail="AgentToken contract not initialized — set AGENT_TOKEN_ADDRESS")
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+
+    results = {}
+    for agent_id in _ON_CHAIN_AGENTS:
+        agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
+        if not agent_wallet:
+            results[agent_id] = {"ok": False, "error": "wallet not found"}
+            continue
+        try:
+            result = await _orchestrator._agent_token.mint(
+                deployer_pk=settings.deployer_private_key,
+                agent_address=agent_wallet,
+                amount_tokens=req.amount,
+            )
+            results[agent_id] = {"ok": True, "tx": result.get("tx_hash")}
+        except Exception as e:
+            results[agent_id] = {"ok": False, "error": str(e)}
+
+    return {"status": "all_funded", "amount": req.amount, "results": results}

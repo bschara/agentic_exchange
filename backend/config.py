@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     agent_registry_address: str = "0x0000000000000000000000000000000000000000"
     treasury_address: str = "0x0000000000000000000000000000000000000000"
     agent_coordinator_address: str = "0x0000000000000000000000000000000000000000"
+    agent_token_address: str = "0x0000000000000000000000000000000000000000"
+
+    # Derived at startup from deployer_private_key — public address, safe to expose
+    deployer_address: str = ""
 
     # Initial price shown before the first on-chain trade arrives
     initial_price: float = 3500.0

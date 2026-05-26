@@ -13,7 +13,7 @@ from web3 import Web3
 from config import settings
 from market.price_engine import ChainPriceTracker
 from market.state_bus import MarketStateBus
-from blockchain.contracts import ExchangeContract, TreasuryContract, AgentCoordinatorContract, AgentRegistryContract
+from blockchain.contracts import ExchangeContract, TreasuryContract, AgentCoordinatorContract, AgentRegistryContract, AgentTokenContract
 from api.websocket_hub import ConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -45,10 +45,11 @@ def _load_local_deployment():
         c = dep.get("contracts", {})
         is_local = "127.0.0.1" in settings.somnia_rpc_url or "localhost" in settings.somnia_rpc_url
         if c.get("Exchange", {}).get("address") and (is_local or not _is_address(settings.exchange_address)):
-            settings.exchange_address         = c["Exchange"]["address"]
-            settings.treasury_address         = c["Treasury"]["address"]
+            settings.exchange_address          = c["Exchange"]["address"]
+            settings.treasury_address          = c["Treasury"]["address"]
             settings.agent_coordinator_address = c["AgentCoordinator"]["address"]
-            settings.agent_registry_address   = c.get("AgentRegistry", {}).get("address", settings.agent_registry_address)
+            settings.agent_registry_address    = c.get("AgentRegistry", {}).get("address", settings.agent_registry_address)
+            settings.agent_token_address       = c.get("AgentToken", {}).get("address", settings.agent_token_address)
             logger.info(f"Loaded contract addresses from {json_path.name}")
 
         # Load agent PKs if .env has placeholders or on local devnet (enables zero-config local dev)
@@ -76,6 +77,12 @@ class AgentOrchestrator:
 
         _load_local_deployment()
 
+        # Derive deployer address from private key so auth.py can compare signatures
+        try:
+            settings.deployer_address = Account.from_key(settings.deployer_private_key).address
+        except Exception:
+            logger.warning("Could not derive deployer address from deployer_private_key")
+
         self._price_tracker = ChainPriceTracker(initial_price=settings.initial_price)
         self._state_bus = MarketStateBus(self._price_tracker)
 
@@ -84,6 +91,7 @@ class AgentOrchestrator:
         self._treasury: Optional[TreasuryContract] = None
         self._coordinator: Optional[AgentCoordinatorContract] = None
         self._registry: Optional[AgentRegistryContract] = None
+        self._agent_token: Optional[AgentTokenContract] = None
 
         if _is_address(settings.exchange_address):
             self._exchange = ExchangeContract(settings.exchange_address, settings.somnia_rpc_url)
@@ -94,6 +102,17 @@ class AgentOrchestrator:
                 )
         if _is_address(settings.agent_registry_address):
             self._registry = AgentRegistryContract(settings.agent_registry_address, settings.somnia_rpc_url)
+        if _is_address(settings.agent_token_address):
+            self._agent_token = AgentTokenContract(settings.agent_token_address, settings.somnia_rpc_url)
+
+        # Set of agent IDs whose on-chain loop has been deliberately paused
+        self.paused_agents: set[str] = set()
+
+        # Maps Exchange order ID → agent_id for orders placed via AgentCoordinator.
+        # Coordinator's msg.sender is the contract address (not individual agent wallets),
+        # so wallet_to_id lookups fail for on-chain trades. This map is built from
+        # DecisionExecuted events which carry both agentId and orderId.
+        self._order_to_agent: dict[int, str] = {}
 
         # Must be initialized before the agents loop so wallet_address can be propagated
         self._chain_metrics: dict = self._build_initial_chain_metrics()
@@ -159,6 +178,8 @@ class AgentOrchestrator:
             "win_streak":               0,    # consecutive filled orders
             "loop_stopped":             False,
             "loop_stopped_reason":      None,
+            "paused":                   False,
+            "agt_balance":              0.0,
             "trade_pnl":                0.0,
             "total_buy_volume":         0.0,
             "total_sell_volume":        0.0,
@@ -263,13 +284,32 @@ class AgentOrchestrator:
 
         while True:
             try:
+                # Update order→agent mapping BEFORE fetching trades so attribution is correct
+                # even when DecisionExecuted and TradeExecuted land in the same block.
+                if self._coordinator:
+                    dec_events = await self._coordinator.get_decision_executed_events(from_block)
+                    for ev in dec_events:
+                        order_id = int(ev.get("orderId", 0))
+                        agent_id_str = ev.get("agentId", "")
+                        if order_id > 0 and agent_id_str:
+                            self._order_to_agent[order_id] = agent_id_str
+
                 if self._exchange:
                     events = await self._exchange.get_recent_trade_events(from_block)
                     candle_updates: dict[int, dict] = {}
 
                     for event in events:
-                        buyer_id  = self._wallet_to_id.get(event["buyer"].lower())
-                        seller_id = self._wallet_to_id.get(event["seller"].lower())
+                        # For on-chain agents, buyer/seller is the coordinator contract address,
+                        # not individual wallets. Fall back to order_id lookup built from
+                        # DecisionExecuted events which map order_id → agent_id.
+                        buyer_id = (
+                            self._wallet_to_id.get(event["buyer"].lower()) or
+                            self._order_to_agent.get(int(event.get("buy_order_id", 0)))
+                        )
+                        seller_id = (
+                            self._wallet_to_id.get(event["seller"].lower()) or
+                            self._order_to_agent.get(int(event.get("sell_order_id", 0)))
+                        )
                         completed_bar = await self._state_bus.record_fill(
                             event["price"], event["amount"], buyer_id, seller_id
                         )
@@ -413,7 +453,8 @@ class AgentOrchestrator:
 
                 elif ev["event"] == "DecisionExecuted" and agent:
                     decision = ev.get("decision", "")
-                    order_id = ev.get("orderId", 0)
+                    order_id = int(ev.get("orderId", 0))
+                    agent_id_str = ev.get("agentId", "")
                     agent["decisions_total"] += 1
                     if decision == "BUY":
                         agent["buy_count"] += 1
@@ -426,6 +467,11 @@ class AgentOrchestrator:
                     price_wei = ev.get("price", 0)
                     agent["last_price"] = float(Web3.from_wei(price_wei, "ether")) if price_wei else 0.0
                     agent["last_order_id"] = order_id
+                    # Track order → agent mapping for P&L attribution (coordinator is msg.sender,
+                    # not individual wallet, so wallet_to_id fails for on-chain trades)
+                    if order_id > 0 and agent_id_str:
+                        self._order_to_agent[order_id] = agent_id_str
+                        agent["orders_placed"] += 1
 
                     # Latency: blocks from trigger to execution × ms per block
                     agent_id_str = ev.get("agentId", "")
@@ -444,10 +490,30 @@ class AgentOrchestrator:
                     agent["failures"] += 1
 
                 elif ev["event"] == "LoopStopped" and agent:
+                    reason = ev.get("reason", "")
                     agent["loop_stopped"] = True
-                    agent["loop_stopped_reason"] = ev.get("reason", "")
-                    metrics["loop_stopped_any"] = True
-                    logger.warning(f"On-chain loop stopped for {ev.get('agentId')}: {ev.get('reason')}")
+                    agent["loop_stopped_reason"] = reason
+                    if reason != "paused":
+                        metrics["loop_stopped_any"] = True
+                    logger.warning(f"On-chain loop stopped for {ev.get('agentId')}: {reason}")
+
+                elif ev["event"] == "AgentPaused":
+                    agent_id_str = ev.get("agentId", "")
+                    self.paused_agents.add(agent_id_str)
+                    if agent:
+                        agent["paused"] = True
+                        agent["loop_stopped"] = True
+                        agent["loop_stopped_reason"] = "paused"
+                    logger.info(f"Agent paused on-chain: {agent_id_str}")
+
+                elif ev["event"] == "AgentResumed":
+                    agent_id_str = ev.get("agentId", "")
+                    self.paused_agents.discard(agent_id_str)
+                    if agent:
+                        agent["paused"] = False
+                        agent["loop_stopped"] = False
+                        agent["loop_stopped_reason"] = None
+                    logger.info(f"Agent resumed on-chain: {agent_id_str}")
 
                 elif ev["event"] == "LLMRequestFired" and agent:
                     agent["last_fetched_price"] = float(ev.get("fetchedPrice", 0))
@@ -542,10 +608,13 @@ class AgentOrchestrator:
                             },
                         })
 
+            # OrderPlaced events use msg.sender = coordinator address for on-chain agents,
+            # so wallet_to_id lookup fails. orders_placed is now attributed via DecisionExecuted
+            # (see _order_to_agent above). Only count noise_trader orders here via wallet lookup.
             for ev in await self._exchange.get_order_placed_events(from_block):
                 max_block = max(max_block, ev["block"])
                 agent_id = wallet_to_id.get(ev["agent"].lower())
-                if agent_id and agent_id in metrics["agents"]:
+                if agent_id == "noise_trader" and agent_id in metrics["agents"]:
                     metrics["agents"][agent_id]["orders_placed"] += 1
 
         # ── Treasury ─────────────────────────────────────────────────────────────
@@ -554,6 +623,22 @@ class AgentOrchestrator:
             for agent in self.agents.values():
                 balance = await self._treasury.get_balance(agent["wallet_address"])
                 metrics["agents"][agent["agent_id"]]["treasury_balance"] = balance
+
+        # ── AgentToken balances ───────────────────────────────────────────────────
+        # AgentCoordinator is msg.sender for all on-chain placeOrder calls, so the
+        # Exchange pulls AGT escrow from the coordinator address — not individual wallets.
+        # Polling individual agent wallets always returns 0.
+        if self._agent_token:
+            coordinator_agt = 0.0
+            if _is_address(settings.agent_coordinator_address):
+                coordinator_agt = await self._agent_token.get_balance(settings.agent_coordinator_address)
+            for agent in self.agents.values():
+                agent_id = agent["agent_id"]
+                if agent_id == "noise_trader":
+                    bal = await self._agent_token.get_balance(agent["wallet_address"])
+                    metrics["agents"][agent_id]["agt_balance"] = bal
+                else:
+                    metrics["agents"][agent_id]["agt_balance"] = coordinator_agt
 
         # Ensure wallet_address is always current in metrics (supports explorer links)
         for agent in self.agents.values():
@@ -603,7 +688,7 @@ class AgentOrchestrator:
                         continue
                     agent_id = cfg["id"]
                     agent_data = self._chain_metrics.get("agents", {}).get(agent_id, {})
-                    if agent_data.get("loop_stopped"):
+                    if agent_data.get("loop_stopped") or agent_id in self.paused_agents:
                         continue
                     last_seen = self._watchdog_last_seen.get(agent_id, 0.0)
                     if now - last_seen > STALL_SECONDS:

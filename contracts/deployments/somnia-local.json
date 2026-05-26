@@ -1,26 +1,26 @@
 {
   "chainId": 31337,
   "network": "localhost",
-  "deployedAt": "2026-05-24T21:52:44.804Z",
+  "deployedAt": "2026-05-26T21:31:11.180Z",
   "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
   "contracts": {
     "MockPlatform": {
-      "address": "0x525C7063E7C20997BaaE9bDa922159152D0e8417"
+      "address": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
     },
     "AgentToken": {
-      "address": "0x38a024C0b412B9d1db8BC398140D00F5Af3093D4"
+      "address": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
     },
     "Exchange": {
-      "address": "0x5fc748f1FEb28d7b76fa1c6B07D8ba2d5535177c"
+      "address": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
     },
     "AgentRegistry": {
-      "address": "0xB82008565FdC7e44609fA118A4a681E92581e680"
+      "address": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
     },
     "Treasury": {
-      "address": "0x2a810409872AfC346F9B5b26571Fd6eC42EA4849"
+      "address": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
     },
     "AgentCoordinator": {
-      "address": "0xb9bEECD1A582768711dE1EE7B0A1d582D9d72a6C"
+      "address": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"
     }
   },
   "abis": {
@@ -1013,6 +1013,25 @@
           },
           {
             "indexed": false,
+            "internalType": "bool",
+            "name": "active",
+            "type": "bool"
+          }
+        ],
+        "name": "AgentActiveUpdated",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "agent",
+            "type": "address"
+          },
+          {
+            "indexed": false,
             "internalType": "string",
             "name": "name",
             "type": "string"
@@ -1265,6 +1284,24 @@
             "type": "address"
           },
           {
+            "internalType": "bool",
+            "name": "active",
+            "type": "bool"
+          }
+        ],
+        "name": "setActive",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "agent",
+            "type": "address"
+          },
+          {
             "internalType": "int256",
             "name": "delta",
             "type": "int256"
@@ -1492,6 +1529,32 @@
         ],
         "stateMutability": "nonpayable",
         "type": "constructor"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": false,
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "AgentPaused",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": false,
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "AgentResumed",
+        "type": "event"
       },
       {
         "anonymous": false,
@@ -1749,6 +1812,25 @@
             "internalType": "uint8",
             "name": "decimals",
             "type": "uint8"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "",
+            "type": "string"
+          }
+        ],
+        "name": "agentPaused",
+        "outputs": [
+          {
+            "internalType": "bool",
+            "name": "",
+            "type": "bool"
           }
         ],
         "stateMutability": "view",
@@ -2024,6 +2106,19 @@
       {
         "inputs": [
           {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "pauseAgent",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
             "internalType": "uint256",
             "name": "",
             "type": "uint256"
@@ -2085,6 +2180,19 @@
           }
         ],
         "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "resumeAgent",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function"
       },
       {

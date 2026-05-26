@@ -51,19 +51,37 @@ def _load_abis():
         {"inputs": [{"name": "agent", "type": "address"}], "name": "isRegistered", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
         {"inputs": [{"name": "agent", "type": "address"}], "name": "incrementTrades", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
         {"inputs": [{"name": "agent", "type": "address"}, {"name": "delta", "type": "int256"}], "name": "updateReputation", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "agent", "type": "address"}, {"name": "active", "type": "bool"}], "name": "setActive", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"anonymous": False, "inputs": [{"indexed": True, "name": "agent", "type": "address"}, {"indexed": False, "name": "active", "type": "bool"}], "name": "AgentActiveUpdated", "type": "event"},
+    ]
+    _ABIS["AgentToken"] = [
+        {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "mint", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "spender", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "approve", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "from", "type": "address"}, {"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "transferFrom", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "totalSupply", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "symbol", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
+        {"anonymous": False, "inputs": [{"indexed": True, "name": "from", "type": "address"}, {"indexed": True, "name": "to", "type": "address"}, {"indexed": False, "name": "value", "type": "uint256"}], "name": "Transfer", "type": "event"},
     ]
     _ABIS["AgentCoordinator"] = [
         {"inputs": [{"name": "agentId", "type": "string"}], "name": "triggerAgentDecision", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
         {"inputs": [{"name": "agentId", "type": "string"}, {"name": "rawPrice", "type": "uint256"}], "name": "triggerWithPrice", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "pauseAgent", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "resumeAgent", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
         {"inputs": [], "name": "getBalance", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
         {"inputs": [{"name": "", "type": "string"}], "name": "winStreak", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
         {"inputs": [{"name": "", "type": "string"}], "name": "lastDecision", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "", "type": "string"}], "name": "agentPaused", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "requestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}], "name": "DecisionTriggered", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "llmRequestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}, {"indexed": False, "name": "fetchedPrice", "type": "uint256"}, {"indexed": False, "name": "context", "type": "string"}], "name": "LLMRequestFired", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "requestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}, {"indexed": False, "name": "decision", "type": "string"}, {"indexed": False, "name": "price", "type": "uint256"}, {"indexed": False, "name": "orderId", "type": "uint256"}, {"indexed": False, "name": "streak", "type": "uint256"}], "name": "DecisionExecuted", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "requestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}, {"indexed": False, "name": "reason", "type": "string"}], "name": "DecisionFailed", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": False, "name": "agentId", "type": "string"}, {"indexed": False, "name": "reason", "type": "string"}, {"indexed": False, "name": "balance", "type": "uint256"}], "name": "LoopStopped", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": False, "name": "direction", "type": "string"}, {"indexed": False, "name": "agentCount", "type": "uint256"}, {"indexed": False, "name": "price", "type": "uint256"}, {"indexed": False, "name": "orderId", "type": "uint256"}], "name": "CoalitionFormed", "type": "event"},
+        {"anonymous": False, "inputs": [{"indexed": False, "name": "agentId", "type": "string"}], "name": "AgentPaused", "type": "event"},
+        {"anonymous": False, "inputs": [{"indexed": False, "name": "agentId", "type": "string"}], "name": "AgentResumed", "type": "event"},
     ]
 
 
@@ -346,6 +364,15 @@ class AgentRegistryContract:
         except Exception as e:
             logger.debug(f"AgentRegistry.updateReputation failed: {e}")
 
+    async def set_active(self, deployer_pk: str, agent_address: str, active: bool) -> None:
+        try:
+            data = self._contract.encode_abi(
+                "setActive", args=[Web3.to_checksum_address(agent_address), active]
+            )
+            await send_transaction(deployer_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+        except Exception as e:
+            logger.debug(f"AgentRegistry.setActive failed: {e}")
+
 
 class AgentCoordinatorContract:
     """
@@ -422,6 +449,47 @@ class AgentCoordinatorContract:
             logger.debug(f"AgentCoordinator.lastDecision({agent_id}) failed: {e}")
             return ""
 
+    async def pause_agent(self, deployer_pk: str, agent_id: str) -> dict:
+        """Calls AgentCoordinator.pauseAgent(agentId) — halts the on-chain self-retrigger loop."""
+        data = self._contract.encode_abi("pauseAgent", args=[agent_id])
+        tx_hash = await send_transaction(deployer_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+        return {"tx_hash": tx_hash, "agent_id": agent_id}
+
+    async def resume_agent(self, deployer_pk: str, agent_id: str) -> dict:
+        """Calls AgentCoordinator.resumeAgent(agentId) — clears the pause flag."""
+        data = self._contract.encode_abi("resumeAgent", args=[agent_id])
+        tx_hash = await send_transaction(deployer_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+        return {"tx_hash": tx_hash, "agent_id": agent_id}
+
+    async def is_paused(self, agent_id: str) -> bool:
+        loop = asyncio.get_running_loop()
+        try:
+            return bool(await loop.run_in_executor(
+                None, lambda: self._contract.functions.agentPaused(agent_id).call()
+            ))
+        except Exception as e:
+            logger.debug(f"AgentCoordinator.agentPaused({agent_id}) failed: {e}")
+            return False
+
+    async def get_decision_executed_events(self, from_block: int) -> list[dict]:
+        """Poll only DecisionExecuted events — used by the 1s trade loop to keep
+        _order_to_agent current before attributing trades from the same block."""
+        loop = asyncio.get_running_loop()
+        try:
+            events = await loop.run_in_executor(
+                None,
+                lambda: self._contract.events.DecisionExecuted.get_logs(
+                    from_block=from_block, to_block="latest"
+                ),
+            )
+            return [
+                {"event": "DecisionExecuted", "block": e["blockNumber"], **dict(e["args"])}
+                for e in events
+            ]
+        except Exception as e:
+            logger.debug(f"DecisionExecuted event poll failed: {e}")
+            return []
+
     async def get_coordinator_events(self, from_block: int) -> list[dict]:
         """Poll all coordinator events in one pass. Returns events sorted by block."""
         loop = asyncio.get_running_loop()
@@ -434,6 +502,8 @@ class AgentCoordinatorContract:
             ("LoopStopped",       self._contract.events.LoopStopped),
             ("LLMRequestFired",   self._contract.events.LLMRequestFired),
             ("CoalitionFormed",   self._contract.events.CoalitionFormed),
+            ("AgentPaused",       self._contract.events.AgentPaused),
+            ("AgentResumed",      self._contract.events.AgentResumed),
         ]
 
         for name, event_cls in event_types:
@@ -451,3 +521,48 @@ class AgentCoordinatorContract:
 
         results.sort(key=lambda x: x["block"])
         return results
+
+
+class AgentTokenContract:
+    """ERC20-like AgentToken — mint tokens to agent wallets to fund sell-side order escrow."""
+
+    def __init__(self, address: str, rpc_url: str):
+        self.address = address
+        self.rpc_url = rpc_url
+        w3 = get_web3(rpc_url)
+        self._contract = w3.eth.contract(
+            address=Web3.to_checksum_address(address),
+            abi=_ABIS.get("AgentToken", []),
+        )
+
+    async def mint(self, deployer_pk: str, agent_address: str, amount_tokens: float) -> dict:
+        """Mint `amount_tokens` AGT (human-readable) to agent_address. Requires deployer (owner) key."""
+        amount_wei = int(amount_tokens * 1e18)
+        data = self._contract.encode_abi("mint", args=[Web3.to_checksum_address(agent_address), amount_wei])
+        tx_hash = await send_transaction(deployer_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+        return {"tx_hash": tx_hash, "agent_address": agent_address, "amount": amount_tokens}
+
+    async def get_balance(self, agent_address: str) -> float:
+        loop = asyncio.get_running_loop()
+        try:
+            balance_wei = await loop.run_in_executor(
+                None,
+                lambda: self._contract.functions.balanceOf(
+                    Web3.to_checksum_address(agent_address)
+                ).call(),
+            )
+            return float(Web3.from_wei(balance_wei, "ether"))
+        except Exception as e:
+            logger.debug(f"AgentToken.balanceOf({agent_address}) failed: {e}")
+            return 0.0
+
+    async def get_total_supply(self) -> float:
+        loop = asyncio.get_running_loop()
+        try:
+            supply_wei = await loop.run_in_executor(
+                None, lambda: self._contract.functions.totalSupply().call()
+            )
+            return float(Web3.from_wei(supply_wei, "ether"))
+        except Exception as e:
+            logger.debug(f"AgentToken.totalSupply failed: {e}")
+            return 0.0
