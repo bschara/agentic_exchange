@@ -36,8 +36,18 @@ export interface Fill {
   tx_hash?: string;
 }
 
+export interface UserAgentRecord {
+  agent_id:      string;
+  owner_address: string;
+  name:          string;
+  icon:          string;
+  risk_level:    number;
+  created_at:    number;
+  metrics?:      AgentState;
+}
+
 export interface AgentState {
-  agent_id: 'market_maker' | 'momentum_trader' | 'arbitrage_agent' | 'risk_manager' | 'noise_trader';
+  agent_id: string;
   agent_name: string;
   decisions_total: number;
   buy_count: number;

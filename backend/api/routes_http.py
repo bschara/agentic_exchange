@@ -84,11 +84,12 @@ async def get_registry():
     """On-chain agent discovery — returns all registered agents from AgentRegistry."""
     if not _orchestrator or not _orchestrator._registry:
         return {"agents": [], "error": "AgentRegistry not initialized"}
-    addresses = await _orchestrator._registry.get_all_agents()
+    agent_ids = await _orchestrator._registry.get_all_agent_ids()
     agents = []
-    for addr in addresses:
-        info = await _orchestrator._registry.get_agent(addr)
+    for agent_id in agent_ids:
+        info = await _orchestrator._registry.get_agent(agent_id)
         if info:
+            info["agent_id"] = agent_id
             agents.append(info)
     return {"agents": agents, "count": len(agents)}
 
@@ -116,23 +117,36 @@ async def trigger_all_agents():
 
 
 _ON_CHAIN_AGENTS = ["market_maker", "momentum_trader", "arbitrage_agent", "risk_manager"]
+# Agents with no coordinator-driven loop (noise_trader runs pure Python)
+_PYTHON_ONLY_AGENTS = {"noise_trader"}
+
+
+def _agent_pk(agent_id: str) -> str:
+    """Return the appropriate PK for triggering a given agent. User agents use deployer key."""
+    from agents.orchestrator import AGENT_CONFIGS
+    for c in AGENT_CONFIGS:
+        if c["id"] == agent_id:
+            return getattr(settings, c["pk_key"])
+    return settings.deployer_private_key
 
 
 @router.post("/agents/{agent_id}/pause", dependencies=[Depends(admin_auth)])
 async def pause_agent(agent_id: str):
-    """Pause an agent's on-chain self-retrigger loop to conserve STT tokens."""
+    """Pause any agent's on-chain self-retrigger loop (system or user)."""
     if not _orchestrator or not _orchestrator._coordinator:
         raise HTTPException(status_code=503, detail="AgentCoordinator not initialized")
-    if agent_id not in _ON_CHAIN_AGENTS:
+    if agent_id not in _orchestrator.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    if agent_id in _PYTHON_ONLY_AGENTS:
+        raise HTTPException(status_code=400, detail=f"{agent_id} is Python-only and has no on-chain loop")
 
     result = await _orchestrator._coordinator.pause_agent(settings.deployer_private_key, agent_id)
     _orchestrator.paused_agents.add(agent_id)
 
-    agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
-    if agent_wallet and _orchestrator._registry:
+    # Update registry for system agents that have wallets
+    if _orchestrator._registry:
         try:
-            await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, False)
+            await _orchestrator._registry.set_active(settings.deployer_private_key, agent_id, False)
         except Exception:
             pass
 
@@ -141,26 +155,26 @@ async def pause_agent(agent_id: str):
 
 @router.post("/agents/{agent_id}/resume", dependencies=[Depends(admin_auth)])
 async def resume_agent(agent_id: str):
-    """Resume a paused agent — clears the pause flag and fires a fresh trigger."""
+    """Resume any paused agent — clears the pause flag and fires a fresh trigger."""
     if not _orchestrator or not _orchestrator._coordinator:
         raise HTTPException(status_code=503, detail="AgentCoordinator not initialized")
-    if agent_id not in _ON_CHAIN_AGENTS:
+    if agent_id not in _orchestrator.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    if agent_id in _PYTHON_ONLY_AGENTS:
+        raise HTTPException(status_code=400, detail=f"{agent_id} is Python-only and has no on-chain loop")
 
     resume_result = await _orchestrator._coordinator.resume_agent(settings.deployer_private_key, agent_id)
     _orchestrator.paused_agents.discard(agent_id)
 
-    agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
-    if agent_wallet and _orchestrator._registry:
+    if _orchestrator._registry:
         try:
-            await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, True)
+            await _orchestrator._registry.set_active(settings.deployer_private_key, agent_id, True)
         except Exception:
             pass
 
-    from agents.orchestrator import AGENT_CONFIGS
-    pk = next((getattr(settings, c["pk_key"]) for c in AGENT_CONFIGS if c["id"] == agent_id), settings.deployer_private_key)
-    trigger_result = await _orchestrator._coordinator.trigger_decision(agent_pk=pk, agent_id=agent_id)
-
+    trigger_result = await _orchestrator._coordinator.trigger_decision(
+        agent_pk=_agent_pk(agent_id), agent_id=agent_id
+    )
     return {
         "status": "resumed",
         "agent_id": agent_id,
@@ -171,12 +185,14 @@ async def resume_agent(agent_id: str):
 
 @router.post("/agents/pause-all", dependencies=[Depends(admin_auth)])
 async def pause_all_agents():
-    """Pause all 4 on-chain agents to stop spending STT tokens."""
+    """Pause ALL agents (system + user) to stop spending STT tokens."""
     if not _orchestrator or not _orchestrator._coordinator:
         raise HTTPException(status_code=503, detail="AgentCoordinator not initialized")
 
     results = {}
-    for agent_id in _ON_CHAIN_AGENTS:
+    for agent_id in list(_orchestrator.agents.keys()):
+        if agent_id in _PYTHON_ONLY_AGENTS:
+            continue
         try:
             result = await _orchestrator._coordinator.pause_agent(settings.deployer_private_key, agent_id)
             _orchestrator.paused_agents.add(agent_id)
@@ -195,13 +211,14 @@ async def pause_all_agents():
 
 @router.post("/agents/resume-all", dependencies=[Depends(admin_auth)])
 async def resume_all_agents():
-    """Resume all 4 on-chain agents and fire fresh triggers for each."""
+    """Resume ALL agents (system + user) and fire fresh triggers for each."""
     if not _orchestrator or not _orchestrator._coordinator:
         raise HTTPException(status_code=503, detail="AgentCoordinator not initialized")
 
-    from agents.orchestrator import AGENT_CONFIGS
     results = {}
-    for agent_id in _ON_CHAIN_AGENTS:
+    for agent_id in list(_orchestrator.agents.keys()):
+        if agent_id in _PYTHON_ONLY_AGENTS:
+            continue
         try:
             await _orchestrator._coordinator.resume_agent(settings.deployer_private_key, agent_id)
             _orchestrator.paused_agents.discard(agent_id)
@@ -211,8 +228,9 @@ async def resume_all_agents():
                     await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, True)
                 except Exception:
                     pass
-            pk = next((getattr(settings, c["pk_key"]) for c in AGENT_CONFIGS if c["id"] == agent_id), settings.deployer_private_key)
-            trigger = await _orchestrator._coordinator.trigger_decision(agent_pk=pk, agent_id=agent_id)
+            trigger = await _orchestrator._coordinator.trigger_decision(
+                agent_pk=_agent_pk(agent_id), agent_id=agent_id
+            )
             results[agent_id] = {"ok": True, "trigger_tx": trigger.get("tx_hash")}
         except Exception as e:
             results[agent_id] = {"ok": False, "error": str(e)}
@@ -258,6 +276,7 @@ async def fund_all_agents(req: FundAgentRequest):
         raise HTTPException(status_code=400, detail="Amount must be positive")
 
     results = {}
+    # Fund all system agents that have individual wallets (user agents share coordinator pool)
     for agent_id in _ON_CHAIN_AGENTS:
         agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
         if not agent_wallet:

@@ -1,6 +1,6 @@
 # Backend — Agentic Exchange
 
-Python FastAPI server that kicks off five autonomous agents on Somnia and observes their activity. Four agents (market_maker, momentum_trader, arbitrage_agent, risk_manager) are validated by Somnia's LLM inference agent (multi-validator consensus). A fifth (noise_trader) runs as a pure Python coroutine placing random orders every 4–6 s directly via the Exchange contract.
+Python FastAPI server that kicks off five system autonomous agents on Somnia, observes their activity, and supports any number of **user-defined composable agents**. Four system agents (market_maker, momentum_trader, arbitrage_agent, risk_manager) are validated by Somnia's LLM inference agent (multi-validator consensus). A fifth (noise_trader) runs as a pure Python coroutine. User agents are discovered automatically by polling `AgentOwnerSet` events — no backend API call required to create them.
 
 ---
 
@@ -13,7 +13,10 @@ backend/
 ├── requirements.txt         # Python dependencies (pinned)
 ├── .env                     # Secret keys — NOT committed (see .gitignore)
 ├── agents/
-│   └── orchestrator.py      # AGENT_CONFIGS (5), poll loops, metrics loop, _noise_trader_loop(), _load_local_deployment()
+│   ├── orchestrator.py      # AGENT_CONFIGS (5 system), poll loops, metrics loop, _noise_trader_loop(),
+│   │                        # _load_local_deployment(), polls AgentOwnerSet events,
+│   │                        # _on_user_agent_registered(), _reload_user_agents_from_db(), watchdog for user agents
+│   └── user_agents_db.py    # JSON cache: backend/data/user_agents.json (no private keys)
 ├── market/
 │   ├── price_engine.py      # GBM price simulation + OHLCVBuilder (5s bars)
 │   ├── order_book.py        # In-memory bid/ask depth (BookEntry, OrderBook)
@@ -26,9 +29,10 @@ backend/
     ├── websocket_hub.py     # ConnectionManager: broadcast() to all WS clients
     ├── routes_ws.py         # /ws WebSocket endpoint + message dispatch
     ├── auth.py              # MetaMask wallet-signature auth: verify_admin_signature() + admin_auth FastAPI dep
-    └── routes_http.py       # REST endpoints (health, state, agents, chain-metrics, events, trigger,
-                             # agents/{id}/pause, agents/{id}/resume, agents/{id}/fund,
-                             # agents/pause-all, agents/resume-all, agents/fund-all)
+    ├── routes_http.py       # REST endpoints (health, state, agents, chain-metrics, events, trigger,
+    │                        # agents/{id}/pause, agents/{id}/resume, agents/{id}/fund,
+    │                        # agents/pause-all, agents/resume-all, agents/fund-all)
+    └── routes_user_agents.py# GET /user/agents?address=0x... — cached user agent list + live metrics
 ```
 
 ---

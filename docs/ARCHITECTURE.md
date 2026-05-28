@@ -1,8 +1,10 @@
 # Architecture — Agentic Exchange
 
-Real-time autonomous trading demo on Somnia (chain 50312). Five agents trade autonomously on-chain — four via Somnia's LLM consensus layer, one (noise_trader) as a pure Python random-order loop. Every order lands on a real on-chain limit order book with automatic matching. A WebSocket-connected dashboard makes the system observable in real-time, anchored by a full-width latency comparison panel (Somnia vs Solana vs Ethereum).
+Real-time autonomous trading demo on Somnia (chain 50312). Five system agents trade autonomously on-chain — four via Somnia's LLM consensus layer, one (noise_trader) as a pure Python random-order loop. Any user can also deploy their own **composable user agent** via a single MetaMask transaction. Every order lands on a real on-chain limit order book with automatic matching. A WebSocket-connected dashboard makes the system observable in real-time.
 
-Agents coordinate on-chain without any Python mediation: each agent's LLM prompt includes the previous cycle's decisions from all peers; consecutive wins scale order size automatically; three-agent consensus triggers a coalition order. Every prompt is emitted as the `context` field of `LLMRequestFired` — verifiable on the Somnia explorer.
+System agents coordinate on-chain without any Python mediation: each agent's LLM prompt includes the previous cycle's decisions from all peers; consecutive wins scale order size automatically; three-agent consensus triggers a coalition order. Every prompt is emitted as the `context` field of `LLMRequestFired` — verifiable on the Somnia explorer.
+
+User agents participate in the same LLM pipeline. Ownership is enforced on-chain: `AgentRegistry.agents[agentId].agentOwner` maps to the registering wallet; `AgentRegistry.pauseAgent/resumeAgent` verify `msg.sender == agentOwner` before delegating to the coordinator. No backend intermediary is needed for pause/resume/fund after the initial `AgentRegistry.registerAgent()` transaction.
 
 ---
 
@@ -190,7 +192,7 @@ Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-trigg
 
 ```
 triggerAgentDecision(string agentId)       ← called once by Python on startup
-  → reads agentConfigs[agentId] → { priceUrl, selector, decimals }
+  → reads registry.getPriceConfig(agentId) → { priceUrl, selector, decimals }
   → require(balance >= deposit × 2)
   → platform.createRequest(jsonApiAgentId, handlePriceData.selector, fetchUint payload)
   → pendingPriceRequests[reqId] = PriceRequest(agentId, true)
@@ -365,7 +367,7 @@ Complete flow from startup kick to self-perpetuating on-chain loop — three seq
 │                                                                               │
 │  inferString(                                                                │
 │    prompt  = "ETH/USD: $3245. On-chain last trade: $3244. ...",             │
-│    system  = systemPrompts[agentId],   ← strategy prompt stored on-chain    │
+│    system  = registry.getSystemPrompt(agentId),  ← read from AgentRegistry    │
 │    cot     = false,                                                          │
 │    allowed = ["BUY","SELL","HOLD"]     ← constrains output to 3 values      │
 │  )                                                                           │
@@ -427,7 +429,7 @@ AgentCoordinator.handlePriceData(requestId, responses, ...)  ← platform callba
   · fetchedPrice = abi.decode(responses[0].result, (uint256))
   · _buildContext(fetchedPrice, agentId) — reads Exchange.sol on-chain
   · platform.createRequest{value: deposit}(llmAgentId, handleDecision.selector,
-      inferString(context, systemPrompts[agentId], false, ["BUY","SELL","HOLD"]))
+      inferString(context, registry.getSystemPrompt(agentId), false, ["BUY","SELL","HOLD"]))
   · emit LLMRequestFired(llmRequestId, agentId, fetchedPrice)
        │
        ▼  (Somnia LLM Inference Agent — multi-validator consensus)
@@ -454,7 +456,7 @@ AgentCoordinator.handleDecision(requestId, responses, ...)   ← platform callba
 
 **Deposit**: each cycle consumes 2 deposits — one for the JSON API fetch and one for the LLM inference. `deploy.js` pre-funds the coordinator with 0.05 STT. Top up via `fund()`. When balance drops below `deposit × 2`, `LoopStopped` is emitted and the agent halts gracefully.
 
-**Per-agent system prompts**: stored in `AgentCoordinator.systemPrompts` mapping. Each agent's strategy personality (market maker, momentum trader, arbitrage, risk management) is embedded in the on-chain prompt and set by `deploy.js` at deployment time.
+**Per-agent system prompts**: stored in `AgentRegistry.agents[agentId].systemPrompt`. Each agent's strategy is set during `registerAgent()` — deployer sets system agents at deploy time, users set their own when calling from the frontend. The coordinator reads via `registry.getSystemPrompt(agentId)` on each LLM request.
 
 ---
 
@@ -492,10 +494,13 @@ Event types: `whale_buy`, `whale_sell`, `volatility_spike`, `news_event`, `flash
 | `GET`  | `/debug/config`             | —          | Non-sensitive config values + whether `AgentCoordinator` is initialized               |
 | `POST` | `/agents/{id}/pause`        | admin_auth | Calls `pauseAgent(agentId)` on-chain; loop stops at next `_retrigger()`               |
 | `POST` | `/agents/{id}/resume`       | admin_auth | Calls `resumeAgent(agentId)` then re-fires `triggerAgentDecision()` to restart loop  |
-| `POST` | `/agents/pause-all`         | admin_auth | Pauses all 4 on-chain agents                                                          |
-| `POST` | `/agents/resume-all`        | admin_auth | Resumes all 4 on-chain agents and restarts each loop                                  |
+| `POST` | `/agents/pause-all`         | admin_auth | Pauses all 4 on-chain system agents                                                   |
+| `POST` | `/agents/resume-all`        | admin_auth | Resumes all 4 on-chain system agents and restarts each loop                           |
 | `POST` | `/agents/{id}/fund`         | admin_auth | Body: `{ amount: float }` — mints AGT to the agent                                    |
 | `POST` | `/agents/fund-all`          | admin_auth | Body: `{ amount: float }` — mints AGT to all on-chain agents                          |
+| `GET`  | `/user/agents`              | —          | Query: `?address=0x...` — returns cached user agents for that wallet + live metrics   |
+
+**User agent controls (no backend involved):** `pauseAgent` and `resumeAgent` are called on `AgentRegistry` via MetaMask (ownership verified there); `fund()` is called directly on `AgentCoordinator`. Ownership enforced by `AgentRegistry.agents[agentId].agentOwner`.
 
 **`admin_auth`** dependency (`api/auth.py`): reads `X-Admin-Sig`, `X-Admin-Message`, `X-Admin-Address` HTTP headers. Verifies `personal_sign(message, address)` where `message = "admin:<action>:<unix_timestamp>"`. Signer must match `deployer_address` (derived from `DEPLOYER_PRIVATE_KEY` at startup). Requests older than 5 minutes are rejected.
 
@@ -510,9 +515,13 @@ Event types: `whale_buy`, `whale_sell`, `volatility_spike`, `news_event`, `flash
 - `recentTrades`: last 50 trades
 - `currentPrice`, `isConnected`
 
+### `userStore`
+
+- `walletAddress: string | null` — connected MetaMask wallet address; written by `Header` on connect, read by `page.tsx` to gate the MY AGENTS tab and pass to `MyAgentsPanel`
+
 ### `agentStore`
 
-- `agents: Record<agent_id, AgentState>` — latest state for each of 5 agents; updated on every `chain_metrics` message
+- `agents: Record<string, AgentState>` — latest state for all tracked agents (system + user); updated on every `chain_metrics` message
 - `decisionHistory: Record<agent_id, string[]>` — last 20 `"BUY @ $3245"` entries per agent, derived from `chain_metrics` diffs
 - `coordinatorBalance`, `totalLocked`, `loopStoppedAny`, `recentFills`, `somniaBlockMs` — top-level metrics from `chain_metrics`
 - Per-agent fields include: `last_context` (full LLM prompt from `LLMRequestFired.context`), `win_streak` (from `DecisionExecuted.streak`), `net_position`, `unrealized_pnl`, `wallet_address`
@@ -578,3 +587,7 @@ MM-Prime / Momentum-Alpha / Arb-Scanner
 | **AGT balance from coordinator**                 | On-chain agents hold no AGT in individual wallets — the coordinator holds a shared 10M pool approved for Exchange. The backend polls `AgentToken.balanceOf(coordinator_address)` and shows that number for all 4 on-chain agents. Noise_trader shows its own wallet balance (individual 1M from `seed.js`).                                                                                     |
 | **`pauseAgent`/`resumeAgent` for STT conservation** | `_retrigger()` checks `agentPaused[agentId]` on-chain before consuming a deposit. When paused it emits `LoopStopped(agentId, "paused", ...)` and returns without spending STT. Python observes `AgentPaused` events and updates `orchestrator.paused_agents` so the watchdog doesn't re-trigger. `loop_stopped_any` ignores "paused" reasons so the UI warning only fires for genuine fund exhaustion. |
 | **Wallet signature auth for admin endpoints**    | `personal_sign(message, address)` with a timestamped message means MetaMask prompts the user visibly, the signature is tied to the deployer key, and replayed signatures expire after 5 minutes. The deployer address is derived server-side from `DEPLOYER_PRIVATE_KEY` — not stored separately in env. Frontend admin controls only appear when the connected wallet address matches `NEXT_PUBLIC_DEPLOYER_ADDRESS`. |
+| **Composable user agents — fully trustless**     | `AgentRegistry.registerAgent()` is `external` with no access restriction — anyone can call it; `msg.sender` becomes `agentOwner`. The registry stores all config (systemPrompt, priceConfig, riskLevel) and calls `coordinator.addAgentToList()` to register the agent for peer-signal iteration. `AgentRegistry.pauseAgent/resumeAgent` verify `msg.sender == agentOwner` before calling coordinator. `fund()` on the coordinator has no access restriction. The backend only fires the initial `triggerAgentDecision()` kick and provides the `GET /user/agents` read endpoint — it holds no user keys and is not required for any post-registration control flow. |
+| **Event-driven user agent discovery**            | The orchestrator polls `AgentRegistered` events from `AgentRegistry` on each metrics cycle. When a new event is detected, `_on_user_agent_registered()` persists the record to `backend/data/user_agents.json`, registers the agent in the orchestrator's in-memory state, and fires `triggerAgentDecision()`. On restart, `_reload_user_agents_from_db()` restores state from the JSON cache without re-triggering. The chain is always the authoritative source; the JSON cache is a fast read-through for `GET /user/agents`. |
+| **Config ownership in AgentRegistry**            | Agent configuration (systemPrompt, priceUrl/selector/decimals, riskLevel) is owned by `AgentRegistry` and exposed via view getters (`getSystemPrompt`, `getPriceConfig`, `getRiskLevel`). The coordinator reads these on every decision cycle via `IAgentRegistry(registry)` external calls. This keeps `AgentCoordinator` as a pure execution engine — it stores only runtime state (`winStreak`, `lastDecision`, `agentPaused`, `_agentIdList`). No `setAgentConfig` or `setSystemPrompt` functions exist on the coordinator; all config changes go through the registry. |
+| **No per-agent wallets for user agents**         | System agents each have an individual wallet that signs transactions and pays gas. User agents do not — all orders are placed by `AgentCoordinator` as `msg.sender` regardless of which agent ID triggered them. This means no private key is generated or stored for user agents. The deployer key provides gas for `triggerAgentDecision()` (unrestricted) and the watchdog retriggers. Users fund the shared coordinator STT balance via `fund()` rather than an individual wallet. |

@@ -14,3 +14,4 @@ yarn-debug.log*
 # NOTE: contracts/deployments/somnia-testnet.json is intentionally tracked.
 # It holds deployed contract addresses + ABIs (no secrets).
 # Private keys live only in .env files which are ignored per-directory above.
+backend/data/

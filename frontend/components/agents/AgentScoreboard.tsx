@@ -11,7 +11,7 @@ const AGENT_ICONS: Record<string, string> = {
   noise_trader:    '🎲',
 };
 
-const MEDALS = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+const MEDALS = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
 
 function pnlColor(pnl: number): string {
   if (pnl > 0) return 'text-emerald-400';
@@ -69,10 +69,10 @@ export function AgentScoreboard() {
             className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all duration-300 ${pnlBg(pnl)}`}
           >
             {/* Rank */}
-            <span className="text-base w-5 text-center flex-none">{MEDALS[idx]}</span>
+            <span className="text-base w-5 text-center flex-none">{MEDALS[idx] ?? `${idx + 1}.`}</span>
 
             {/* Agent identity */}
-            <span className="text-base flex-none">{AGENT_ICONS[agent.agent_id]}</span>
+            <span className="text-base flex-none">{AGENT_ICONS[agent.agent_id] ?? '🤖'}</span>
             <div className="flex-1 min-w-0">
               <div className="text-xs font-bold text-white truncate">{agent.agent_name}</div>
               {hasTrades ? (
