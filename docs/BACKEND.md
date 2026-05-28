@@ -19,6 +19,7 @@ backend/
 │   └── user_agents_db.py    # JSON cache: backend/data/user_agents.json (no private keys)
 ├── market/
 │   ├── price_engine.py      # GBM price simulation + OHLCVBuilder (5s bars)
+│   ├── price_feed.py        # CoinGecko + Binance ETH/USD feed (reference price fallback)
 │   ├── order_book.py        # In-memory bid/ask depth (BookEntry, OrderBook)
 │   └── state_bus.py         # Async-safe shared state: price, order book, warnings, events
 ├── blockchain/
@@ -276,21 +277,21 @@ ABI loading strategy: tries `contracts/deployments/somnia-testnet.json` first (d
 
 ### HTTP Endpoints
 
-| Method | Path                        | Auth      | Description                                                                                          |
-| ------ | --------------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
-| `GET`  | `/health`                   | —         | `{ status, agents_running, ws_connections }`                                                         |
-| `GET`  | `/state`                    | —         | Full market snapshot from `MarketStateBus`                                                           |
-| `GET`  | `/agents`                   | —         | Array of 5 agent state summaries from `chain_metrics`                                                |
-| `GET`  | `/chain-metrics`            | —         | Latest `chain_metrics` snapshot (live coordinator/exchange/treasury state)                           |
-| `POST` | `/events/inject`            | —         | Body: `{ "event_type": "...", "params": {} }`                                                        |
-| `POST` | `/agents/trigger`           | —         | Re-fires `triggerAgentDecision()` for all 4 on-chain agents; returns per-agent tx hashes or errors   |
-| `GET`  | `/debug/config`             | —         | Non-sensitive settings + `coordinator_initialized` flag — useful for diagnosing misconfigured `.env` |
-| `POST` | `/agents/{agent_id}/pause`  | admin_auth | Calls `coordinator.pause_agent(deployer_pk, agent_id)`; loop stops at next `_retrigger()` call       |
+| Method | Path                        | Auth       | Description                                                                                           |
+| ------ | --------------------------- | ---------- | ----------------------------------------------------------------------------------------------------- |
+| `GET`  | `/health`                   | —          | `{ status, agents_running, ws_connections }`                                                          |
+| `GET`  | `/state`                    | —          | Full market snapshot from `MarketStateBus`                                                            |
+| `GET`  | `/agents`                   | —          | Array of 5 agent state summaries from `chain_metrics`                                                 |
+| `GET`  | `/chain-metrics`            | —          | Latest `chain_metrics` snapshot (live coordinator/exchange/treasury state)                            |
+| `POST` | `/events/inject`            | —          | Body: `{ "event_type": "...", "params": {} }`                                                         |
+| `POST` | `/agents/trigger`           | —          | Re-fires `triggerAgentDecision()` for all 4 on-chain agents; returns per-agent tx hashes or errors    |
+| `GET`  | `/debug/config`             | —          | Non-sensitive settings + `coordinator_initialized` flag — useful for diagnosing misconfigured `.env`  |
+| `POST` | `/agents/{agent_id}/pause`  | admin_auth | Calls `coordinator.pause_agent(deployer_pk, agent_id)`; loop stops at next `_retrigger()` call        |
 | `POST` | `/agents/{agent_id}/resume` | admin_auth | Calls `coordinator.resume_agent(deployer_pk, agent_id)` then re-fires `trigger_decision()` to restart |
-| `POST` | `/agents/pause-all`         | admin_auth | Pauses all 4 on-chain agents in sequence                                                             |
-| `POST` | `/agents/resume-all`        | admin_auth | Resumes all 4 on-chain agents and restarts each loop                                                 |
-| `POST` | `/agents/{agent_id}/fund`   | admin_auth | Body: `{ "amount": float }` — mints AGT to the agent (or coordinator for on-chain agents)            |
-| `POST` | `/agents/fund-all`          | admin_auth | Body: `{ "amount": float }` — mints AGT to all on-chain agents (via coordinator)                     |
+| `POST` | `/agents/pause-all`         | admin_auth | Pauses all 4 on-chain agents in sequence                                                              |
+| `POST` | `/agents/resume-all`        | admin_auth | Resumes all 4 on-chain agents and restarts each loop                                                  |
+| `POST` | `/agents/{agent_id}/fund`   | admin_auth | Body: `{ "amount": float }` — mints AGT to the agent (or coordinator for on-chain agents)             |
+| `POST` | `/agents/fund-all`          | admin_auth | Body: `{ "amount": float }` — mints AGT to all on-chain agents (via coordinator)                      |
 
 **Admin auth** (`admin_auth` FastAPI dependency in `api/auth.py`): reads `X-Admin-Sig`, `X-Admin-Message`, `X-Admin-Address` headers. Message format: `"admin:<action>:<unix_timestamp>"`. Recovers the signer via `eth_account.Account.recover_message()` and compares against `settings.deployer_address`. Requests older than 5 minutes are rejected to prevent replay attacks. Returns HTTP 403 on any mismatch.
 
@@ -328,17 +329,17 @@ Set `INITIAL_PRICE` and `PRICE_VOLATILITY` in `backend/.env`. Volatility (`σ`) 
 
 ## Key Design Decisions
 
-| Decision                              | Reason                                                                                                                                                                        |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Contract metrics poll, not agent push | Backend observes the on-chain loop via event polling rather than driving it. Decouples dashboard from the trading cycle and never blocks the contract's self-trigger cadence. |
-| `from_block` advances in metrics loop | After each poll the loop stores `max_block_seen + 1` so events are counted exactly once across poll cycles.                                                                   |
-| `_is_address()` guard on init         | Validates addresses against `r"0x[0-9a-fA-F]{40}"` before instantiating contracts — gracefully handles unconfigured `.env` without raising at startup.                        |
-| `asyncio.Lock` per wallet             | Concurrent startup triggers (1s stagger) could cause nonce conflicts; per-wallet lock prevents dropped txs.                                                                   |
-| GBM price, not a real feed            | Demo needs controllable events (whale buy, crash) — a real feed can't be scripted. Replaced by on-chain prices once fills start arriving.                                     |
-| Hardcoded 6 gwei gas                  | `eth_gasPrice` RPC returns unreliable values on Somnia testnet; hardcoding avoids tx failures.                                                                                |
-| 30s receipt timeout (not infinite)    | A stuck startup trigger should never block the orchestrator — log and continue.                                                                                               |
-| Agents stagger 1s at startup          | Spreads the burst of `triggerAgentDecision()` transactions to avoid nonce collisions during the initial on-chain kickoff.                                                     |
-| `_order_to_agent` dict for attribution | `AgentCoordinator` is `msg.sender` for all `Exchange.placeOrder()` calls — individual agent wallets never appear in `OrderPlaced`. `DecisionExecuted` carries both `agentId` and `orderId`, so the backend builds a `{order_id → agent_id}` map from these events and uses it as a fallback in `_trade_event_poll_loop` when the wallet lookup returns nothing. |
-| `get_decision_executed_events` in trade loop | `DecisionExecuted` and `TradeExecuted` can fire in the same block (order auto-matches on placement). The 5s metrics loop might not have processed `DecisionExecuted` yet when the 1s trade loop tries to attribute a trade. Polling `DecisionExecuted` at the top of each 1s iteration keeps `_order_to_agent` current. |
-| AGT balance from coordinator           | On-chain agents hold no AGT in their own wallets — the coordinator holds a shared 10M pool. `_collect_chain_metrics` polls `AgentToken.balanceOf(coordinator_address)` and assigns the coordinator's balance to all 4 on-chain agents. Only `noise_trader` gets its own wallet balance. |
-| Wallet signature auth (admin_auth)    | Admin endpoints (pause/resume/fund) require a `personal_sign` MetaMask signature with a timestamped message. The deployer address is derived server-side from `DEPLOYER_PRIVATE_KEY` — never stored in env as a config value — and the signature is verified on every request. 5-minute window prevents replay. |
+| Decision                                     | Reason                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Contract metrics poll, not agent push        | Backend observes the on-chain loop via event polling rather than driving it. Decouples dashboard from the trading cycle and never blocks the contract's self-trigger cadence.                                                                                                                                                                                   |
+| `from_block` advances in metrics loop        | After each poll the loop stores `max_block_seen + 1` so events are counted exactly once across poll cycles.                                                                                                                                                                                                                                                     |
+| `_is_address()` guard on init                | Validates addresses against `r"0x[0-9a-fA-F]{40}"` before instantiating contracts — gracefully handles unconfigured `.env` without raising at startup.                                                                                                                                                                                                          |
+| `asyncio.Lock` per wallet                    | Concurrent startup triggers (1s stagger) could cause nonce conflicts; per-wallet lock prevents dropped txs.                                                                                                                                                                                                                                                     |
+| GBM price, not a real feed                   | Demo needs controllable events (whale buy, crash) — a real feed can't be scripted. Replaced by on-chain prices once fills start arriving.                                                                                                                                                                                                                       |
+| Hardcoded 6 gwei gas                         | `eth_gasPrice` RPC returns unreliable values on Somnia testnet; hardcoding avoids tx failures.                                                                                                                                                                                                                                                                  |
+| 30s receipt timeout (not infinite)           | A stuck startup trigger should never block the orchestrator — log and continue.                                                                                                                                                                                                                                                                                 |
+| Agents stagger 1s at startup                 | Spreads the burst of `triggerAgentDecision()` transactions to avoid nonce collisions during the initial on-chain kickoff.                                                                                                                                                                                                                                       |
+| `_order_to_agent` dict for attribution       | `AgentCoordinator` is `msg.sender` for all `Exchange.placeOrder()` calls — individual agent wallets never appear in `OrderPlaced`. `DecisionExecuted` carries both `agentId` and `orderId`, so the backend builds a `{order_id → agent_id}` map from these events and uses it as a fallback in `_trade_event_poll_loop` when the wallet lookup returns nothing. |
+| `get_decision_executed_events` in trade loop | `DecisionExecuted` and `TradeExecuted` can fire in the same block (order auto-matches on placement). The 5s metrics loop might not have processed `DecisionExecuted` yet when the 1s trade loop tries to attribute a trade. Polling `DecisionExecuted` at the top of each 1s iteration keeps `_order_to_agent` current.                                         |
+| AGT balance from coordinator                 | On-chain agents hold no AGT in their own wallets — the coordinator holds a shared 10M pool. `_collect_chain_metrics` polls `AgentToken.balanceOf(coordinator_address)` and assigns the coordinator's balance to all 4 on-chain agents. Only `noise_trader` gets its own wallet balance.                                                                         |
+| Wallet signature auth (admin_auth)           | Admin endpoints (pause/resume/fund) require a `personal_sign` MetaMask signature with a timestamped message. The deployer address is derived server-side from `DEPLOYER_PRIVATE_KEY` — never stored in env as a config value — and the signature is verified on every request. 5-minute window prevents replay.                                                 |

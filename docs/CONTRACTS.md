@@ -15,7 +15,7 @@ contracts/
 │   ├── AgentToken.sol       # Mintable ERC20 (AGT): owner-mint, no OZ dependency
 │   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted + AGT settlement
 │   ├── AgentCoordinator.sol # IAgentRequester integration — Somnia LLM for all 4 agents + approveToken()
-│   ├── AgentRegistry.sol    # Agent registration, reputation, trade count
+│   ├── AgentRegistry.sol    # Unified registry: registerAgent(), pauseAgent/resumeAgent, config view getters
 │   ├── Treasury.sol         # Per-agent ETH balances (deposit / withdraw / allocate)
 │   └── MockPlatform.sol     # Local dev: simulates Somnia IAgentRequester callbacks
 ├── scripts/
@@ -253,7 +253,7 @@ Pure execution engine for the on-chain LLM decision loop. All agent configuratio
 | ------------------- | ---------- | ----------------------------------------------------------- |
 | `ORDER_AMOUNT_BASE` | `0.001e18` | Base order size (1×); scales with win streak and risk level |
 | `ORDER_AMOUNT_MAX`  | `0.005e18` | Cap regardless of streak or risk level                      |
-| `PRICE_OFFSET_BPS`  | `10`       | 0.1% — BUY price +0.1%, SELL price −0.1% vs reference      |
+| `PRICE_OFFSET_BPS`  | `10`       | 0.1% — BUY price +0.1%, SELL price −0.1% vs reference       |
 
 **Runtime state (only storage the coordinator owns):**
 
