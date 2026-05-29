@@ -20,19 +20,24 @@ const HARDHAT_PKS = [
   '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d', // Account #1 market_maker
   '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a', // Account #2 momentum_trader
   '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6', // Account #3 arbitrage_agent
-  '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a', // Account #4 risk_manager → 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65
-  '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba', // Account #5 noise_trader → 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc
+  '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a', // Account #4 risk_manager
+  '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba', // Account #5 noise_trader
 ];
 
 const AGENT_IDS = ['market_maker', 'momentum_trader', 'arbitrage_agent', 'risk_manager', 'noise_trader'];
 
+// Unified metadata for all system agents — same fields used by AgentRegistry.registerAgent()
 const AGENT_META = {
-  market_maker:    { name: 'MM-Prime',       strategy: 'market_maker' },
-  momentum_trader: { name: 'Momentum-Alpha', strategy: 'momentum_trader' },
-  arbitrage_agent: { name: 'Arb-Scanner',    strategy: 'arbitrage_agent' },
-  risk_manager:    { name: 'Risk-Shield',    strategy: 'risk_manager' },
-  noise_trader:    { name: 'Noise-Bot',      strategy: 'noise_trader' },
+  market_maker:    { name: 'MM-Prime',       icon: '⚖️', riskLevel: 3 },
+  momentum_trader: { name: 'Momentum-Alpha', icon: '📈', riskLevel: 4 },
+  arbitrage_agent: { name: 'Arb-Scanner',    icon: '🔍', riskLevel: 3 },
+  risk_manager:    { name: 'Risk-Shield',    icon: '🛡️', riskLevel: 2 },
+  noise_trader:    { name: 'Noise-Bot',      icon: '🎲', riskLevel: 1 },
 };
+
+const PRICE_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd';
+const PRICE_SELECTOR = 'ethereum.usd';
+const PRICE_DECIMALS = 0;
 
 const PROMPTS = {
   market_maker:
@@ -79,33 +84,33 @@ async function main() {
   console.log('\n═══ Local Hardhat Deployment ══════════════════════════════');
   console.log('Deployer:', deployer.address);
 
-  // 1. MockPlatform — must deploy before coordinator (address needed in constructor)
+  // 1. MockPlatform
   const MockPlatform = await hre.ethers.getContractFactory('MockPlatform');
   const mockPlatform = await MockPlatform.deploy();
   await mockPlatform.waitForDeployment();
   const mockPlatformAddr = await mockPlatform.getAddress();
   console.log('MockPlatform:      ', mockPlatformAddr);
 
-  // 2. AgentToken (mintable ERC20 for on-chain P&L settlement)
+  // 2. AgentToken
   const AgentToken = await hre.ethers.getContractFactory('AgentToken');
-  const token = await AgentToken.deploy('AgentToken', 'AGT');
+  const token = await AgentToken.deploy('Somnia ETH', 'sETH');
   await token.waitForDeployment();
   const tokenAddr = await token.getAddress();
   console.log('AgentToken:        ', tokenAddr);
 
-  // 3. Exchange — requires AgentToken address (locks AGT on SELL)
+  // 3. QuoteToken (USDC-equivalent for testnet)
+  const QuoteToken = await hre.ethers.getContractFactory('QuoteToken');
+  const quoteToken = await QuoteToken.deploy();
+  await quoteToken.waitForDeployment();
+  const quoteTokenAddr = await quoteToken.getAddress();
+  console.log('QuoteToken:        ', quoteTokenAddr);
+
+  // 4. Exchange (sETH/USDC market)
   const Exchange = await hre.ethers.getContractFactory('Exchange');
-  const exchange = await Exchange.deploy(tokenAddr);
+  const exchange = await Exchange.deploy(tokenAddr, quoteTokenAddr);
   await exchange.waitForDeployment();
   const exchangeAddr = await exchange.getAddress();
   console.log('Exchange:          ', exchangeAddr);
-
-  // 4. AgentRegistry
-  const AgentRegistry = await hre.ethers.getContractFactory('AgentRegistry');
-  const registry = await AgentRegistry.deploy();
-  await registry.waitForDeployment();
-  const registryAddr = await registry.getAddress();
-  console.log('AgentRegistry:     ', registryAddr);
 
   // 5. Treasury
   const Treasury = await hre.ethers.getContractFactory('Treasury');
@@ -114,66 +119,82 @@ async function main() {
   const treasuryAddr = await treasury.getAddress();
   console.log('Treasury:          ', treasuryAddr);
 
-  // 6. AgentCoordinator — pass MockPlatform as the IAgentRequester
+  // 6. AgentCoordinator — deployed BEFORE registry (registry needs coordinator address)
   const AgentCoordinator = await hre.ethers.getContractFactory('AgentCoordinator');
   const coordinator = await AgentCoordinator.deploy(
     mockPlatformAddr,
     exchangeAddr,
-    1n, // llmAgentId (irrelevant for mock)
-    1n  // jsonApiAgentId (irrelevant for mock)
+    1n,
+    1n
   );
   await coordinator.waitForDeployment();
   const coordinatorAddr = await coordinator.getAddress();
   console.log('AgentCoordinator:  ', coordinatorAddr);
 
-  // Mint AGT to coordinator (pool for all agents) + approve Exchange
-  const COORDINATOR_MINT = hre.ethers.parseEther('10000000');
-  await (await token.mint(coordinatorAddr, COORDINATOR_MINT)).wait();
-  console.log('Minted 10M AGT to AgentCoordinator');
-  await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
-  console.log('AgentCoordinator approved Exchange for AGT (MaxUint256)');
+  // 7. AgentRegistry — takes coordinator address in constructor
+  const AgentRegistry = await hre.ethers.getContractFactory('AgentRegistry');
+  const registry = await AgentRegistry.deploy(coordinatorAddr);
+  await registry.waitForDeployment();
+  const registryAddr = await registry.getAddress();
+  console.log('AgentRegistry:     ', registryAddr);
 
-  // Set agent configs + prompts
-  console.log('\n─── Configuring agents ────────────────────────────────────');
+  // 8. Wire registry into coordinator so registry can call onlyOwnerOrRegistry functions
+  await (await coordinator.setRegistry(registryAddr)).wait();
+  console.log('coordinator.setRegistry() done');
+
+  // 9. Mint sETH + USDC to coordinator, approve Exchange for both
+  await (await token.mint(coordinatorAddr, hre.ethers.parseEther('10000000'))).wait();
+  console.log('Minted 10M sETH to AgentCoordinator');
+  await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log('AgentCoordinator approved Exchange for sETH');
+  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('10000000'))).wait();
+  console.log('Minted 10M QUOTE to AgentCoordinator');
+  await (await coordinator.approveToken(quoteTokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log('AgentCoordinator approved Exchange for QUOTE');
+
+  // 10. Register ALL system agents via AgentRegistry.registerAgent()
+  //    Deployer is msg.sender → agentOwner = deployer for all system agents.
+  //    This replaces the old separate setAgentConfig() + setSystemPrompt() calls.
+  console.log('\n─── Registering system agents via unified AgentRegistry ───');
   for (const id of AGENT_IDS) {
-    let tx = await coordinator.setAgentConfig(id, 'https://mock.price/eth', 'price', 0);
+    const meta = AGENT_META[id];
+    const tx = await registry.registerAgent(
+      id,
+      meta.name,
+      meta.icon,
+      meta.riskLevel,
+      PROMPTS[id],
+      PRICE_URL,
+      PRICE_SELECTOR,
+      PRICE_DECIMALS
+    );
     await tx.wait();
-    tx = await coordinator.setSystemPrompt(id, PROMPTS[id]);
-    await tx.wait();
-    console.log(`  ${id}: config + prompt set`);
+    console.log(`  ${id}: registered (owner=deployer, icon=${meta.icon}, risk=${meta.riskLevel})`);
   }
 
-  // Fund coordinator (deposit=0 so any balance satisfies the guard, but send some ETH anyway)
-  const fundTx = await coordinator.fund({ value: hre.ethers.parseEther('10.0') });
-  await fundTx.wait();
+  // 11. Fund coordinator with ETH for Somnia platform deposits
+  await (await coordinator.fund({ value: hre.ethers.parseEther('10.0') })).wait();
   console.log('\nCoordinator funded: 10.0 ETH');
 
-  // Register agents in AgentRegistry + fund their treasuries
-  console.log('\n─── Registering agents & funding treasuries ───────────────');
+  // 12. Fund agent treasuries + mint sETH + USDC to noise_trader
+  console.log('\n─── Funding agent treasuries ───────────────────────────────');
   for (let i = 0; i < AGENT_IDS.length; i++) {
-    const id = AGENT_IDS[i];
     const signer = agentSigners[i];
-    const meta = AGENT_META[id];
-
-    let tx = await registry.register(signer.address, meta.name, meta.strategy);
-    await tx.wait();
-
-    tx = await treasury.depositFor(signer.address, { value: hre.ethers.parseEther('0.1') });
-    await tx.wait();
-
-    console.log(`  ${id}: ${signer.address} registered + 0.1 ETH in treasury`);
+    await (await treasury.depositFor(signer.address, { value: hre.ethers.parseEther('0.1') })).wait();
+    console.log(`  ${AGENT_IDS[i]}: 0.1 ETH in treasury`);
   }
 
-  // Mint AGT to noise trader + approve Exchange so it can place SELL orders directly
-  const noiseSigner = agentSigners[4]; // noise_trader is account #5
-  const NOISE_AGT = hre.ethers.parseEther('10000');
-  await (await token.mint(noiseSigner.address, NOISE_AGT)).wait();
+  const noiseSigner = agentSigners[4];
+  await (await token.mint(noiseSigner.address, hre.ethers.parseEther('10000'))).wait();
   await (await token.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
-  console.log(`\nNoise trader funded: 10,000 AGT + Exchange approved (${noiseSigner.address})`);
+  await (await quoteToken.mint(noiseSigner.address, hre.ethers.parseEther('10000000'))).wait();
+  await (await quoteToken.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log(`\nNoise trader: 10,000 sETH + 10M QUOTE + Exchange approved (${noiseSigner.address})`);
 
-  // Read ABIs
+  // 13. Write deployment JSON
   const mockArtifact  = await hre.artifacts.readArtifact('MockPlatform');
   const tokenArtifact = await hre.artifacts.readArtifact('AgentToken');
+  const quoteArtifact = await hre.artifacts.readArtifact('QuoteToken');
   const exchArtifact  = await hre.artifacts.readArtifact('Exchange');
   const regArtifact   = await hre.artifacts.readArtifact('AgentRegistry');
   const trsArtifact   = await hre.artifacts.readArtifact('Treasury');
@@ -187,18 +208,20 @@ async function main() {
     contracts: {
       MockPlatform:     { address: mockPlatformAddr },
       AgentToken:       { address: tokenAddr },
+      QuoteToken:       { address: quoteTokenAddr },
       Exchange:         { address: exchangeAddr },
-      AgentRegistry:    { address: registryAddr },
       Treasury:         { address: treasuryAddr },
       AgentCoordinator: { address: coordinatorAddr },
+      AgentRegistry:    { address: registryAddr },
     },
     abis: {
       MockPlatform:     mockArtifact.abi,
       AgentToken:       tokenArtifact.abi,
+      QuoteToken:       quoteArtifact.abi,
       Exchange:         exchArtifact.abi,
-      AgentRegistry:    regArtifact.abi,
       Treasury:         trsArtifact.abi,
       AgentCoordinator: coordArtifact.abi,
+      AgentRegistry:    regArtifact.abi,
     },
     agents: {
       market_maker:    { address: agentSigners[0].address, pk: HARDHAT_PKS[1] },
@@ -219,6 +242,7 @@ async function main() {
   console.log('SOMNIA_RPC_URL=http://127.0.0.1:8545');
   console.log('SOMNIA_CHAIN_ID=31337');
   console.log(`AGENT_TOKEN_ADDRESS=${tokenAddr}`);
+  console.log(`QUOTE_TOKEN_ADDRESS=${quoteTokenAddr}`);
   console.log(`EXCHANGE_ADDRESS=${exchangeAddr}`);
   console.log(`AGENT_REGISTRY_ADDRESS=${registryAddr}`);
   console.log(`TREASURY_ADDRESS=${treasuryAddr}`);
@@ -228,11 +252,10 @@ async function main() {
   console.log(`ARBITRAGE_AGENT_PK=${HARDHAT_PKS[3]}`);
   console.log(`RISK_MANAGER_PK=${HARDHAT_PKS[4]}`);
   console.log(`NOISE_TRADER_PK=${HARDHAT_PKS[5]}`);
+  console.log('\n─── Paste into frontend/.env.local ─────────────────────────');
+  console.log(`NEXT_PUBLIC_COORDINATOR_ADDRESS=${coordinatorAddr}`);
+  console.log(`NEXT_PUBLIC_REGISTRY_ADDRESS=${registryAddr}`);
   console.log('════════════════════════════════════════════════════════════\n');
-
-  console.log('Next steps:');
-  console.log('  npx hardhat run scripts/test-local.js --network localhost   # smoke test');
-  console.log('  node scripts/platform-daemon.js                             # continuous loop');
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

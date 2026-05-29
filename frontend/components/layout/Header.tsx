@@ -5,6 +5,7 @@ import { useMarketStore } from '@/store/marketStore';
 import { useAgentStore } from '@/store/agentStore';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { connectWallet, isOwnerAddress, pauseAll, resumeAll, fundAll } from '@/hooks/useAdminActions';
+import { useUserStore } from '@/store/userStore';
 import { Badge } from '@/components/ui/badge';
 import { Zap, Activity, Wallet, PauseCircle, PlayCircle, Coins } from 'lucide-react';
 
@@ -22,13 +23,17 @@ export function Header() {
   const { injectEvent } = useWebSocket();
   const [cooldowns, setCooldowns] = useState<Record<string, boolean>>({});
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const setGlobalWallet = useUserStore((s) => s.setWalletAddress);
   const [adminLoading, setAdminLoading] = useState<string | null>(null);
   const [fundAmount, setFundAmount] = useState<string>('100');
   const isOwner = !!walletAddress && isOwnerAddress(walletAddress);
 
   const handleConnect = async () => {
     const addr = await connectWallet();
-    if (addr) setWalletAddress(addr);
+    if (addr) {
+      setWalletAddress(addr);
+      setGlobalWallet(addr);
+    }
   };
 
   const handleAdmin = async (action: string, fn: () => Promise<{ ok: boolean; error?: string }>) => {

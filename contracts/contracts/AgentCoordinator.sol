@@ -59,6 +59,15 @@ interface IExchange {
     function getBestAsk() external view returns (uint256 price, bool exists);
 }
 
+// AgentRegistry view interface — coordinator reads config from registry at runtime
+interface IAgentRegistry {
+    function isRegistered(string calldata agentId) external view returns (bool);
+    function getSystemPrompt(string calldata agentId) external view returns (string memory);
+    function getPriceConfig(string calldata agentId) external view
+        returns (string memory priceUrl, string memory selector, uint8 decimals);
+    function getRiskLevel(string calldata agentId) external view returns (uint8);
+}
+
 // ── AgentCoordinator ────────────────────────────────────────────────────────────
 //
 // Three-step autonomous agent pipeline with peer awareness and adaptive sizing:
@@ -71,6 +80,10 @@ interface IExchange {
 //
 // Python is only the trigger. All data sourcing, peer communication, and
 // decision-making is on-chain.
+//
+// Agent config (systemPrompt, priceUrl, selector, decimals, riskLevel) lives in
+// AgentRegistry. Coordinator reads it via view calls and owns only runtime state:
+// winStreak, lastDecision, agentPaused, lastOrderId, pendingRequests, _agentIdList.
 //
 contract AgentCoordinator {
     // Base order size; scales with win streak via _orderAmount(), capped at 5×
@@ -85,16 +98,10 @@ contract AgentCoordinator {
     uint256 public llmAgentId;
     uint256 public jsonApiAgentId;
 
-    // Per-agent API config (URL, JSON selector, decimal places)
-    struct AgentConfig {
-        string priceUrl;
-        string selector;
-        uint8  decimals;
-    }
-    mapping(string => AgentConfig) public agentConfigs;
+    // Trusted registry — reads config from it; registry calls addAgentToList, pauseAgent, resumeAgent
+    address public registry;
 
-    // Per-agent strategy system prompts stored on-chain
-    mapping(string => string) public systemPrompts;
+    // ── Runtime state (owned by coordinator) ─────────────────────────────────
 
     // Last BUY/SELL/HOLD per agent — read by peers in _buildContext next cycle
     mapping(string => string) public lastDecision;
@@ -102,10 +109,10 @@ contract AgentCoordinator {
     // Consecutive filled-order streak per agent — drives _orderAmount()
     mapping(string => uint256) public winStreak;
 
-    // Pause flags — owner can halt an agent's self-retriggering loop to save STT
+    // Pause flags — halts the self-retriggering loop to save STT
     mapping(string => bool) public agentPaused;
 
-    // Ordered list of configured agent IDs — iterated for peer signals + coalition
+    // Ordered list of agent IDs — iterated for peer signals + coalition
     string[] private _agentIdList;
 
     // Stage-1 pending: JSON API fetch in flight
@@ -125,6 +132,8 @@ contract AgentCoordinator {
 
     // Tracks the last order placed per agent so stale orders can be cancelled before requoting
     mapping(string => uint256) public lastOrderId;
+    // Tracks the last BID order for market_maker (lastOrderId only tracks the ASK side)
+    mapping(string => uint256) public lastBidOrderId;
 
     string[] private _allowedValues;
 
@@ -135,7 +144,6 @@ contract AgentCoordinator {
     event DecisionTriggered(uint256 indexed requestId, string agentId);
     event PriceFetchFailed(uint256 indexed requestId, string agentId);
 
-    // context: the full LLM prompt sent to Somnia validators, visible on-chain
     event LLMRequestFired(
         uint256 indexed llmRequestId,
         string agentId,
@@ -143,7 +151,6 @@ contract AgentCoordinator {
         string context
     );
 
-    // streak: agent's win streak after this decision
     event DecisionExecuted(
         uint256 indexed requestId,
         string agentId,
@@ -155,14 +162,21 @@ contract AgentCoordinator {
 
     event DecisionFailed(uint256 indexed requestId, string agentId, string reason);
     event LoopStopped(string agentId, string reason, uint256 balance);
-
-    // Fired when 3 agents converge on the same direction — coordinated order at 3× base size
     event CoalitionFormed(string direction, uint256 agentCount, uint256 price, uint256 orderId);
+
+    // ── Modifiers ─────────────────────────────────────────────────────────────
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
         _;
     }
+
+    modifier onlyOwnerOrRegistry() {
+        require(msg.sender == owner || msg.sender == registry, "Not authorized");
+        _;
+    }
+
+    // ── Constructor ───────────────────────────────────────────────────────────
 
     constructor(
         address _platform,
@@ -183,20 +197,27 @@ contract AgentCoordinator {
 
     receive() external payable {}
 
-    // ── Configuration ─────────────────────────────────────────────────────────────
+    // ── Registry wiring ───────────────────────────────────────────────────────
 
-    function setAgentConfig(
-        string calldata agentId,
-        string calldata url,
-        string calldata selector,
-        uint8 decimals
-    ) external onlyOwner {
-        agentConfigs[agentId] = AgentConfig(url, selector, decimals);
+    function setRegistry(address _registry) external onlyOwner {
+        registry = _registry;
+    }
+
+    // Called by AgentRegistry.registerAgent() to keep peer-signal list current.
+    function addAgentToList(string calldata agentId) external onlyOwnerOrRegistry {
         if (!_agentIdRegistered(agentId)) _agentIdList.push(agentId);
     }
 
-    function setSystemPrompt(string calldata agentId, string calldata prompt) external onlyOwner {
-        systemPrompts[agentId] = prompt;
+    // ── Operational controls (callable by registry on behalf of agent owners) ─
+
+    function pauseAgent(string calldata agentId) external onlyOwnerOrRegistry {
+        agentPaused[agentId] = true;
+        emit AgentPaused(agentId);
+    }
+
+    function resumeAgent(string calldata agentId) external onlyOwnerOrRegistry {
+        agentPaused[agentId] = false;
+        emit AgentResumed(agentId);
     }
 
     function setLlmAgentId(uint256 agentId) external onlyOwner {
@@ -205,16 +226,6 @@ contract AgentCoordinator {
 
     function setJsonApiAgentId(uint256 agentId) external onlyOwner {
         jsonApiAgentId = agentId;
-    }
-
-    function pauseAgent(string calldata agentId) external onlyOwner {
-        agentPaused[agentId] = true;
-        emit AgentPaused(agentId);
-    }
-
-    function resumeAgent(string calldata agentId) external onlyOwner {
-        agentPaused[agentId] = false;
-        emit AgentResumed(agentId);
     }
 
     function fund() external payable {}
@@ -230,21 +241,22 @@ contract AgentCoordinator {
 
     // ── Step 1: Trigger — Python calls this once per agent loop ──────────────────
     //
-    // Fires a Somnia JSON API request to fetch the current ETH/USD price.
-    // No market data is passed from Python — the agent self-sources its own data.
+    // Reads price config from registry, fires Somnia JSON API price fetch.
     //
-    function triggerAgentDecision(string calldata agentId) external {
-        AgentConfig memory cfg = agentConfigs[agentId];
-        require(bytes(cfg.priceUrl).length > 0, "No config for agent");
+    function triggerAgentDecision(string calldata agentId) external onlyOwner {
+        require(IAgentRegistry(registry).isRegistered(agentId), "Agent not registered");
 
         uint256 deposit = platform.getRequestDeposit();
         require(address(this).balance >= deposit * 2, "Coordinator underfunded: need 2 deposits");
 
+        (string memory priceUrl, string memory selector, uint8 decimals) =
+            IAgentRegistry(registry).getPriceConfig(agentId);
+
         bytes memory payload = abi.encodeWithSelector(
             IJSONAPIAgent.fetchUint.selector,
-            cfg.priceUrl,
-            cfg.selector,
-            cfg.decimals
+            priceUrl,
+            selector,
+            decimals
         );
 
         uint256 reqId = platform.createRequest{value: deposit}(
@@ -260,7 +272,7 @@ contract AgentCoordinator {
 
     // ── Step 1b (optional): Backend injects price directly, skipping JSON API ────
     function triggerWithPrice(string calldata agentId, uint256 rawPrice) external onlyOwner {
-        require(bytes(agentConfigs[agentId].priceUrl).length > 0, "No config for agent");
+        require(IAgentRegistry(registry).isRegistered(agentId), "Agent not registered");
         uint256 deposit = platform.getRequestDeposit();
         require(address(this).balance >= deposit, "Coordinator underfunded");
         _fireLLMRequest(agentId, rawPrice);
@@ -268,9 +280,6 @@ contract AgentCoordinator {
     }
 
     // ── Step 2: Callback — Somnia JSON API agent returns the price ───────────────
-    //
-    // Builds on-chain context (price + peer signals + own streak) and fires LLM.
-    //
     function handlePriceData(
         uint256 requestId,
         IAgentRequester.Response[] memory responses,
@@ -295,7 +304,12 @@ contract AgentCoordinator {
     // ── Internal: fire LLM inference request with a known price ─────────────────
     function _fireLLMRequest(string memory agentId, uint256 fetchedPrice) internal {
         string memory context   = _buildContext(fetchedPrice, agentId);
-        string memory sysPrompt = _getSystemPrompt(agentId);
+        string memory sysPrompt = IAgentRegistry(registry).getSystemPrompt(agentId);
+
+        // Fallback if registry has no prompt (shouldn't happen after registration)
+        if (bytes(sysPrompt).length == 0) {
+            sysPrompt = "You are an autonomous trading agent. Respond with exactly one word: BUY, SELL, or HOLD.";
+        }
 
         bytes memory llmPayload = abi.encodeWithSelector(
             ILLMAgent.inferString.selector,
@@ -317,9 +331,6 @@ contract AgentCoordinator {
     }
 
     // ── Step 3: Callback — Somnia LLM validators reach consensus ─────────────────
-    //
-    // Stores decision for peers, checks coalition, updates streak, places order.
-    //
     function handleDecision(
         uint256 requestId,
         IAgentRequester.Response[] memory responses,
@@ -339,22 +350,30 @@ contract AgentCoordinator {
             return;
         }
 
-        // Cancel stale order from the previous cycle before placing a new one
+        // Cancel stale orders from the previous cycle before placing new ones
         uint256 prev = lastOrderId[req.agentId];
         if (prev > 0) {
             try exchange.cancelOrder(prev) {} catch {}
             lastOrderId[req.agentId] = 0;
         }
+        uint256 prevBid = lastBidOrderId[req.agentId];
+        if (prevBid > 0) {
+            try exchange.cancelOrder(prevBid) {} catch {}
+            lastBidOrderId[req.agentId] = 0;
+        }
 
-        AgentConfig memory cfg = agentConfigs[req.agentId];
-        uint256 basePrice = _toWei(req.fetchedPrice, cfg.decimals);
+        (, , uint8 decimals) = IAgentRegistry(registry).getPriceConfig(req.agentId);
+        // Use on-chain sETH price when available; seed from ETH/USD oracle on first run
+        uint256 basePrice = exchange.hasTraded()
+            ? exchange.getLastTradePrice()
+            : _toWei(req.fetchedPrice, decimals);
 
         // Market maker posts both sides simultaneously to actually make markets.
-        // Bypasses LLM result — its strategy is fixed dual-sided quoting.
         if (_strEq(req.agentId, "market_maker")) {
             uint256 bidPrice = basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
             uint256 askPrice = basePrice * (10000 + PRICE_OFFSET_BPS) / 10000;
             try exchange.placeOrder(true,  bidPrice, ORDER_AMOUNT_BASE) returns (uint256 bidId) {
+                lastBidOrderId[req.agentId] = bidId;
                 emit DecisionExecuted(requestId, req.agentId, "BUY",  bidPrice, bidId, 0);
             } catch {}
             try exchange.placeOrder(false, askPrice, ORDER_AMOUNT_BASE) returns (uint256 askId) {
@@ -369,10 +388,8 @@ contract AgentCoordinator {
         bool isBuy  = _strEq(decision, "BUY");
         bool isSell = _strEq(decision, "SELL");
 
-        // Publish this decision so peers read it in their next LLM context
         lastDecision[req.agentId] = decision;
 
-        // Coalition check: when 3 directional agents converge, fire a coordinated order
         if (isBuy || isSell) {
             uint256 agreeCount = _coalitionCount(decision);
             if (agreeCount == 3) {
@@ -387,7 +404,6 @@ contract AgentCoordinator {
             return;
         }
 
-        // Price relative to live fetched reference to prevent drift
         uint256 orderPrice = isBuy
             ? basePrice * (10000 + PRICE_OFFSET_BPS) / 10000
             : basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
@@ -404,30 +420,32 @@ contract AgentCoordinator {
         _retrigger(req.agentId);
     }
 
-    // ── Self-re-trigger — keeps the agent loop running without any off-chain call ─
+    // ── Self-re-trigger ───────────────────────────────────────────────────────────
     function _retrigger(string memory agentId) internal {
         if (agentPaused[agentId]) {
             emit LoopStopped(agentId, "paused", address(this).balance);
             return;
         }
 
-        AgentConfig memory cfg = agentConfigs[agentId];
-        uint256 needed = platform.getRequestDeposit() * 2;
-
-        if (bytes(cfg.priceUrl).length == 0) {
+        if (!IAgentRegistry(registry).isRegistered(agentId)) {
             emit LoopStopped(agentId, "No agent config", address(this).balance);
             return;
         }
+
+        uint256 needed = platform.getRequestDeposit() * 2;
         if (address(this).balance < needed) {
             emit LoopStopped(agentId, "Insufficient balance", address(this).balance);
             return;
         }
 
+        (string memory priceUrl, string memory selector, uint8 decimals) =
+            IAgentRegistry(registry).getPriceConfig(agentId);
+
         bytes memory payload = abi.encodeWithSelector(
             IJSONAPIAgent.fetchUint.selector,
-            cfg.priceUrl,
-            cfg.selector,
-            cfg.decimals
+            priceUrl,
+            selector,
+            decimals
         );
         uint256 newReqId = platform.createRequest{value: platform.getRequestDeposit()}(
             jsonApiAgentId,
@@ -448,7 +466,6 @@ contract AgentCoordinator {
         return false;
     }
 
-    // Returns "agentId=DECISION,..." for all peers with a recorded decision, excluding self.
     function _buildPeerSignals(string memory excludeId) internal view returns (string memory) {
         bytes memory result;
         bool first = true;
@@ -464,22 +481,22 @@ contract AgentCoordinator {
         return first ? "none" : string(result);
     }
 
-    // Order amount scales +1× per 5 consecutive wins, capped at ORDER_AMOUNT_MAX.
     function _orderAmount(string memory agentId) internal view returns (uint256) {
         uint256 streak = winStreak[agentId];
         uint256 multiplier = 1 + streak / 5;
-        uint256 amt = ORDER_AMOUNT_BASE * multiplier;
+        uint8   risk   = IAgentRegistry(registry).getRiskLevel(agentId);
+        // risk==0 or unregistered → 1× baseline; risk 1-5 → 0.4×…2×
+        uint256 riskFactor = risk == 0 ? 30 : uint256(risk) * 12;
+        uint256 amt = ORDER_AMOUNT_BASE * multiplier * riskFactor / 30;
         return amt > ORDER_AMOUNT_MAX ? ORDER_AMOUNT_MAX : amt;
     }
 
-    // Count how many agents in _agentIdList have lastDecision == direction.
     function _coalitionCount(string memory direction) internal view returns (uint256 count) {
         for (uint256 i = 0; i < _agentIdList.length; i++) {
             if (_strEq(lastDecision[_agentIdList[i]], direction)) count++;
         }
     }
 
-    // Fire a 3× coordinated order when agents reach consensus.
     function _fireCoalitionOrder(bool isBuy, uint256 basePrice) internal {
         uint256 coalitionAmt = ORDER_AMOUNT_BASE * 3;
         uint256 price = isBuy
@@ -490,12 +507,10 @@ contract AgentCoordinator {
         } catch {}
     }
 
-    // Build a market context string entirely from on-chain data, including peer signals
-    // and own win streak. fetchedPrice is in AgentConfig.decimals scale.
     function _buildContext(uint256 fetchedPrice, string memory agentId) internal view returns (string memory) {
-        AgentConfig memory cfg = agentConfigs[agentId];
-        uint256 priceUsd = cfg.decimals == 0  ? fetchedPrice
-                         : cfg.decimals == 2  ? fetchedPrice / 100
+        (, , uint8 decimals) = IAgentRegistry(registry).getPriceConfig(agentId);
+        uint256 priceUsd = decimals == 0  ? fetchedPrice
+                         : decimals == 2  ? fetchedPrice / 100
                          : fetchedPrice / 1e18;
 
         uint256 lastFillUsd = exchange.hasTraded() ? exchange.getLastTradePrice() / 1e18 : 0;
@@ -511,8 +526,8 @@ contract AgentCoordinator {
             : "";
 
         string memory part1 = string(abi.encodePacked(
-            "ETH/USD: $", _uint2str(priceUsd),
-            ". Last trade: $", _uint2str(lastFillUsd),
+            "ETH oracle: $", _uint2str(priceUsd),
+            ". sETH last trade: $", _uint2str(lastFillUsd),
             ". Bid: $", bidOk ? _uint2str(bidUsd) : "none",
             ". Ask: $", askOk ? _uint2str(askUsd) : "none"
         ));
@@ -524,13 +539,6 @@ contract AgentCoordinator {
         return string(abi.encodePacked(part1, part2));
     }
 
-    function _getSystemPrompt(string memory agentId) internal view returns (string memory) {
-        string memory p = systemPrompts[agentId];
-        if (bytes(p).length > 0) return p;
-        return "You are an autonomous trading agent. Respond with exactly one word: BUY, SELL, or HOLD.";
-    }
-
-    // Scale a fetched price (in AgentConfig.decimals) to 1e18 for Exchange.sol
     function _toWei(uint256 price, uint8 decimals) internal pure returns (uint256) {
         if (decimals == 0)  return price * 1e18;
         if (decimals == 2)  return price * 1e16;

@@ -1,84 +1,173 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+interface IAgentCoordinator {
+    function addAgentToList(string calldata agentId) external;
+    function pauseAgent(string calldata agentId) external;
+    function resumeAgent(string calldata agentId) external;
+}
+
+// ── AgentRegistry ────────────────────────────────────────────────────────────
+//
+// Unified registry and source of truth for ALL agent data — system agents
+// registered by the deployer, user-defined agents registered by anyone.
+// msg.sender becomes agentOwner.
+//
+// Stores: ownership, display metadata, AND agent config (systemPrompt,
+// priceUrl, selector, decimals). AgentCoordinator reads config via view
+// getters on each decision cycle — it owns only runtime state.
+//
 contract AgentRegistry {
     struct AgentInfo {
-        address wallet;
-        string name;
-        string strategy;
-        int256 reputation;
-        uint256 tradesExecuted;
-        uint256 registeredAt;
-        bool active;
+        // ── Ownership & display ────────────────────────────────────────────
+        address agentOwner;   // deployer for system agents; user wallet for custom agents
+        string  name;
+        string  icon;         // display emoji e.g. "⚖️"
+        uint8   riskLevel;    // 1-5: scales order size in coordinator _orderAmount()
+        uint256 createdAt;
+        bool    active;
+        // ── Agent config (read by coordinator on each decision cycle) ──────
+        string  systemPrompt; // LLM strategy prompt — passed to Somnia inferString()
+        string  priceUrl;     // CoinGecko or other JSON API endpoint
+        string  selector;     // JSON path selector e.g. "ethereum.usd"
+        uint8   decimals;     // price decimal places (0 = whole dollars)
     }
 
     address public owner;
-    address[] private _agentAddresses;
-    mapping(address => AgentInfo) public agents;
-    mapping(address => bool) public registered;
+    address public coordinator;
+    string[] private _allAgentIds;
 
-    event AgentRegistered(address indexed agent, string name, string strategy);
-    event ReputationUpdated(address indexed agent, int256 delta, int256 newReputation);
-    event AgentActiveUpdated(address indexed agent, bool active);
+    mapping(string  => AgentInfo) public agents;
+    mapping(address => string[])  public ownerAgents;
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+    // ── Events ────────────────────────────────────────────────────────────────
+
+    event AgentRegistered(
+        string  indexed agentId,
+        address indexed agentOwner,
+        string  name,
+        string  icon,
+        uint8   riskLevel
+    );
+    event AgentPaused(string indexed agentId, address indexed caller);
+    event AgentResumed(string indexed agentId, address indexed caller);
+
+    // ── Modifiers ─────────────────────────────────────────────────────────────
+
+    modifier onlyContractOwner() {
+        require(msg.sender == owner, "Not registry owner");
         _;
     }
 
-    constructor() {
+    modifier onlyOwnerOrAgentOwner(string calldata agentId) {
+        require(
+            msg.sender == owner || msg.sender == agents[agentId].agentOwner,
+            "Not authorized: must be contract owner or agent owner"
+        );
+        _;
+    }
+
+    // ── Constructor ───────────────────────────────────────────────────────────
+
+    constructor(address _coordinator) {
         owner = msg.sender;
+        coordinator = _coordinator;
     }
 
-    function register(
-        address agent,
+    // ── Registration ──────────────────────────────────────────────────────────
+
+    // One registration function for ALL agents.
+    // Deployer calls for system agents; users call for their own.
+    // Stores ALL config here — coordinator reads it back via getters.
+    function registerAgent(
+        string calldata agentId,
         string calldata name,
-        string calldata strategy
-    ) external onlyOwner {
-        require(!registered[agent], "Already registered");
-        require(agent != address(0), "Zero address");
+        string calldata icon,
+        uint8  riskLevel,
+        string calldata systemPrompt,
+        string calldata priceUrl,
+        string calldata selector,
+        uint8  decimals
+    ) external {
+        require(agents[agentId].agentOwner == address(0), "Agent ID already taken");
+        require(riskLevel >= 1 && riskLevel <= 5, "riskLevel must be 1-5");
+        require(bytes(priceUrl).length > 0, "priceUrl required");
 
-        agents[agent] = AgentInfo({
-            wallet: agent,
-            name: name,
-            strategy: strategy,
-            reputation: 100,
-            tradesExecuted: 0,
-            registeredAt: block.timestamp,
-            active: true
+        agents[agentId] = AgentInfo({
+            agentOwner:   msg.sender,
+            name:         name,
+            icon:         icon,
+            riskLevel:    riskLevel,
+            createdAt:    block.timestamp,
+            active:       true,
+            systemPrompt: systemPrompt,
+            priceUrl:     priceUrl,
+            selector:     selector,
+            decimals:     decimals
         });
-        registered[agent] = true;
-        _agentAddresses.push(agent);
+        ownerAgents[msg.sender].push(agentId);
+        _allAgentIds.push(agentId);
 
-        emit AgentRegistered(agent, name, strategy);
+        // Tell coordinator to add this agentId to its peer-signal iteration list
+        IAgentCoordinator(coordinator).addAgentToList(agentId);
+
+        emit AgentRegistered(agentId, msg.sender, name, icon, riskLevel);
     }
 
-    function updateReputation(address agent, int256 delta) external onlyOwner {
-        require(registered[agent], "Not registered");
-        agents[agent].reputation += delta;
-        emit ReputationUpdated(agent, delta, agents[agent].reputation);
+    // ── Pause / Resume ────────────────────────────────────────────────────────
+
+    function pauseAgent(string calldata agentId) external onlyOwnerOrAgentOwner(agentId) {
+        require(agents[agentId].agentOwner != address(0), "Agent not registered");
+        IAgentCoordinator(coordinator).pauseAgent(agentId);
+        emit AgentPaused(agentId, msg.sender);
     }
 
-    function setActive(address agent, bool active) external onlyOwner {
-        require(registered[agent], "Not registered");
-        agents[agent].active = active;
-        emit AgentActiveUpdated(agent, active);
+    function resumeAgent(string calldata agentId) external onlyOwnerOrAgentOwner(agentId) {
+        require(agents[agentId].agentOwner != address(0), "Agent not registered");
+        IAgentCoordinator(coordinator).resumeAgent(agentId);
+        emit AgentResumed(agentId, msg.sender);
     }
 
-    function incrementTrades(address agent) external onlyOwner {
-        require(registered[agent], "Not registered");
-        agents[agent].tradesExecuted++;
+    // ── Admin ─────────────────────────────────────────────────────────────────
+
+    function setActive(string calldata agentId, bool active) external onlyContractOwner {
+        agents[agentId].active = active;
+        // Propagate to coordinator so the on-chain loop actually stops/resumes
+        if (!active) {
+            IAgentCoordinator(coordinator).pauseAgent(agentId);
+        } else {
+            IAgentCoordinator(coordinator).resumeAgent(agentId);
+        }
     }
 
-    function getAgent(address agent) external view returns (AgentInfo memory) {
-        return agents[agent];
+    // ── Config getters (read by AgentCoordinator on each decision cycle) ──────
+
+    function getSystemPrompt(string calldata agentId) external view returns (string memory) {
+        return agents[agentId].systemPrompt;
     }
 
-    function getAllAgents() external view returns (address[] memory) {
-        return _agentAddresses;
+    function getPriceConfig(string calldata agentId) external view
+        returns (string memory priceUrl, string memory selector, uint8 decimals)
+    {
+        AgentInfo storage a = agents[agentId];
+        return (a.priceUrl, a.selector, a.decimals);
     }
 
-    function isRegistered(address agent) external view returns (bool) {
-        return registered[agent];
+    function getRiskLevel(string calldata agentId) external view returns (uint8) {
+        return agents[agentId].riskLevel;
+    }
+
+    // ── Discovery ─────────────────────────────────────────────────────────────
+
+    function getAllAgentIds() external view returns (string[] memory) {
+        return _allAgentIds;
+    }
+
+    function getAgentsByOwner(address _owner) external view returns (string[] memory) {
+        return ownerAgents[_owner];
+    }
+
+    function isRegistered(string calldata agentId) external view returns (bool) {
+        return agents[agentId].agentOwner != address(0);
     }
 }

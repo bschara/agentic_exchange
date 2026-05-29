@@ -13,7 +13,7 @@ from web3 import Web3
 from config import settings
 from market.price_engine import ChainPriceTracker
 from market.state_bus import MarketStateBus
-from blockchain.contracts import ExchangeContract, TreasuryContract, AgentCoordinatorContract, AgentRegistryContract, AgentTokenContract
+from blockchain.contracts import ExchangeContract, TreasuryContract, AgentCoordinatorContract, AgentRegistryContract, AgentTokenContract, QuoteTokenContract
 from api.websocket_hub import ConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ def _load_local_deployment():
             settings.agent_coordinator_address = c["AgentCoordinator"]["address"]
             settings.agent_registry_address    = c.get("AgentRegistry", {}).get("address", settings.agent_registry_address)
             settings.agent_token_address       = c.get("AgentToken", {}).get("address", settings.agent_token_address)
+            settings.quote_token_address       = c.get("QuoteToken", {}).get("address", settings.quote_token_address)
             logger.info(f"Loaded contract addresses from {json_path.name}")
 
         # Load agent PKs if .env has placeholders or on local devnet (enables zero-config local dev)
@@ -92,6 +93,7 @@ class AgentOrchestrator:
         self._coordinator: Optional[AgentCoordinatorContract] = None
         self._registry: Optional[AgentRegistryContract] = None
         self._agent_token: Optional[AgentTokenContract] = None
+        self._quote_token: Optional[QuoteTokenContract] = None
 
         if _is_address(settings.exchange_address):
             self._exchange = ExchangeContract(settings.exchange_address, settings.somnia_rpc_url)
@@ -104,6 +106,8 @@ class AgentOrchestrator:
             self._registry = AgentRegistryContract(settings.agent_registry_address, settings.somnia_rpc_url)
         if _is_address(settings.agent_token_address):
             self._agent_token = AgentTokenContract(settings.agent_token_address, settings.somnia_rpc_url)
+        if _is_address(settings.quote_token_address):
+            self._quote_token = QuoteTokenContract(settings.quote_token_address, settings.somnia_rpc_url)
 
         # Set of agent IDs whose on-chain loop has been deliberately paused
         self.paused_agents: set[str] = set()
@@ -147,6 +151,9 @@ class AgentOrchestrator:
         # Tracks wall-clock time of last observed DecisionTriggered per agent (for watchdog)
         self._watchdog_last_seen: dict[str, float] = {}
 
+        # Load persisted user agents into memory on startup (no re-trigger — loops already running)
+        self._reload_user_agents_from_db()
+
         self._poll_task: Optional[asyncio.Task] = None
         self._snapshot_task: Optional[asyncio.Task] = None
         self._metrics_task: Optional[asyncio.Task] = None
@@ -180,6 +187,8 @@ class AgentOrchestrator:
             "loop_stopped_reason":      None,
             "paused":                   False,
             "agt_balance":              0.0,
+            "quote_balance":            0.0,
+            "initial_quote_balance":    None,  # set on first poll; P&L delta measured from here
             "trade_pnl":                0.0,
             "total_buy_volume":         0.0,
             "total_sell_volume":        0.0,
@@ -224,10 +233,9 @@ class AgentOrchestrator:
             for cfg in AGENT_CONFIGS:
                 if cfg["id"] not in _on_chain_agents:
                     continue  # noise_trader uses Python loop only
-                pk = getattr(settings, cfg["pk_key"])
                 try:
                     result = await self._coordinator.trigger_decision(
-                        agent_pk=pk,
+                        agent_pk=settings.deployer_private_key,
                         agent_id=cfg["id"],
                     )
                     logger.info(f"  {cfg['id']} initial trigger: {result.get('tx_hash')}")
@@ -374,41 +382,21 @@ class AgentOrchestrator:
             await asyncio.sleep(2.0)
 
     async def _sync_registry_data(self):
-        """Discover all on-chain agents and sync their metadata into chain_metrics."""
+        """Sync agent name/icon/riskLevel from the unified string-keyed AgentRegistry."""
         if not self._registry:
             return
         try:
-            addresses = await self._registry.get_all_agents()
-            for addr in addresses:
-                info = await self._registry.get_agent(addr)
-                if not info:
+            agent_ids = await self._registry.get_all_agent_ids()
+            for agent_id in agent_ids:
+                info = await self._registry.get_agent(agent_id)
+                if not info or not info.get("agentOwner"):
                     continue
-
-                # Wallet mapping is authoritative — strategy field is human-readable, not an ID.
-                # Using strategy as fallback only for genuinely unknown wallets.
-                agent_id = self._wallet_to_id.get(addr.lower()) or info.get("strategy")
-                if not agent_id:
-                    continue
-
-                # If this wallet is already mapped but agent_id isn't in chain_metrics, skip —
-                # that means the wallet belongs to a known agent whose metrics entry exists under
-                # a different key. Never auto-create a duplicate entry for a known wallet.
                 if agent_id not in self._chain_metrics["agents"]:
-                    if self._wallet_to_id.get(addr.lower()):
-                        continue
                     self._chain_metrics["agents"][agent_id] = self._empty_agent_metrics(agent_id)
-                    self._wallet_to_id[addr.lower()] = agent_id
-                    self._id_to_wallet[agent_id] = addr.lower()
-                    logger.info(f"Discovered new agent from registry: {agent_id} ({addr})")
-
                 ag = self._chain_metrics["agents"][agent_id]
-                ag["agent_name"]      = info.get("name") or agent_id
-                ag["strategy"]        = info.get("strategy", "")
-                ag["reputation"]      = info.get("reputation", 100)
-                ag["trades_on_chain"] = info.get("tradesExecuted", 0)
-                ag["registered_at"]   = info.get("registeredAt", 0)
-                ag["active"]          = info.get("active", True)
-                ag["wallet_address"]  = addr
+                ag["agent_name"]   = info.get("name") or agent_id
+                ag["registered_at"] = info.get("createdAt", 0)
+                ag["active"]        = info.get("active", True)
         except Exception as e:
             logger.debug(f"Registry sync failed: {e}")
 
@@ -428,6 +416,14 @@ class AgentOrchestrator:
             try:
                 from_block = await self._collect_chain_metrics(from_block, self._wallet_to_id)
                 await self._sync_registry_data()
+                # Poll AgentRegistered events from registry to discover newly created agents
+                if self._registry:
+                    for ev in await self._registry.get_agent_registered_events(from_block - 1 if from_block > 0 else 0):
+                        agent_id = ev["agentId"]
+                        if agent_id not in self.agents:
+                            await self._on_user_agent_registered(
+                                agent_id, ev["agentOwner"], ev["name"], ev["icon"], ev["riskLevel"]
+                            )
             except Exception as e:
                 logger.error(f"Contract metrics poll error: {e}")
             await asyncio.sleep(5.0)
@@ -514,6 +510,7 @@ class AgentOrchestrator:
                         agent["loop_stopped"] = False
                         agent["loop_stopped_reason"] = None
                     logger.info(f"Agent resumed on-chain: {agent_id_str}")
+
 
                 elif ev["event"] == "LLMRequestFired" and agent:
                     agent["last_fetched_price"] = float(ev.get("fetchedPrice", 0))
@@ -640,6 +637,48 @@ class AgentOrchestrator:
                 else:
                     metrics["agents"][agent_id]["agt_balance"] = coordinator_agt
 
+
+        # ── QuoteToken balances + auto-replenishment ────────────────────────────
+        if self._quote_token:
+            QUOTE_TOPUP_THRESHOLD = 1_000.0
+            QUOTE_TOPUP_AMOUNT    = 10_000_000.0
+
+            coordinator_quote = 0.0
+            if _is_address(settings.agent_coordinator_address):
+                coordinator_quote = await self._quote_token.get_balance(settings.agent_coordinator_address)
+
+            for agent in self.agents.values():
+                agent_id   = agent["agent_id"]
+                agent_data = metrics["agents"].get(agent_id, {})
+                bal = (await self._quote_token.get_balance(agent["wallet_address"])
+                       if agent_id == "noise_trader" else coordinator_quote)
+                agent_data["quote_balance"] = bal
+                if agent_data.get("initial_quote_balance") is None and bal > 0:
+                    agent_data["initial_quote_balance"] = bal
+
+            if coordinator_quote < QUOTE_TOPUP_THRESHOLD and _is_address(settings.agent_coordinator_address):
+                logger.warning(f"Coordinator QUOTE low ({coordinator_quote:.2f}) — minting {QUOTE_TOPUP_AMOUNT:.0f}")
+                try:
+                    res = await self._quote_token.mint(
+                        settings.deployer_private_key, settings.agent_coordinator_address, QUOTE_TOPUP_AMOUNT
+                    )
+                    logger.info(f"Coordinator QUOTE top-up tx: {res.get('tx_hash', '')[:16]}")
+                except Exception as e:
+                    logger.error(f"Coordinator QUOTE top-up failed: {e}")
+
+            noise_wallet = self.agents.get("noise_trader", {}).get("wallet_address", "")
+            if noise_wallet and _is_address(noise_wallet):
+                noise_quote = metrics["agents"].get("noise_trader", {}).get("quote_balance", 0.0)
+                if noise_quote < QUOTE_TOPUP_THRESHOLD:
+                    logger.warning(f"Noise trader QUOTE low ({noise_quote:.2f}) — minting {QUOTE_TOPUP_AMOUNT:.0f}")
+                    try:
+                        res = await self._quote_token.mint(
+                            settings.deployer_private_key, noise_wallet, QUOTE_TOPUP_AMOUNT
+                        )
+                        logger.info(f"Noise trader QUOTE top-up tx: {res.get('tx_hash', '')[:16]}")
+                    except Exception as e:
+                        logger.error(f"Noise trader QUOTE top-up failed: {e}")
+
         # Ensure wallet_address is always current in metrics (supports explorer links)
         for agent in self.agents.values():
             agent_id = agent["agent_id"]
@@ -662,9 +701,8 @@ class AgentOrchestrator:
             try:
                 ref_price = self._price_tracker.price
                 if ref_price > 0 and self._exchange:
-                    # Noise trader has no AGT tokens so SELL orders revert (Exchange locks AGT on SELL).
-                    # Always BUY — main agents provide the SELL side via AgentCoordinator.
-                    is_buy = True
+                    # Noise trader now has both AGT and QUOTE — can trade either direction
+                    is_buy = random.choice([True, False])
                     slippage = random.uniform(-0.005, 0.005)
                     price = ref_price * (1 + slippage)
                     amount = round(random.uniform(0.03, 0.08), 3)
@@ -683,6 +721,8 @@ class AgentOrchestrator:
         while True:
             if self._coordinator:
                 now = time.time()
+
+                # System agents
                 for cfg in AGENT_CONFIGS:
                     if cfg["id"] not in _on_chain_agents:
                         continue
@@ -693,15 +733,103 @@ class AgentOrchestrator:
                     last_seen = self._watchdog_last_seen.get(agent_id, 0.0)
                     if now - last_seen > STALL_SECONDS:
                         logger.warning(f"[watchdog] {agent_id} stalled ({now - last_seen:.0f}s) — re-triggering")
-                        pk = getattr(settings, cfg["pk_key"])
                         try:
-                            result = await self._coordinator.trigger_decision(agent_pk=pk, agent_id=agent_id)
+                            result = await self._coordinator.trigger_decision(
+                                agent_pk=settings.deployer_private_key, agent_id=agent_id
+                            )
                             logger.info(f"[watchdog] {agent_id} retrigger tx={result.get('tx_hash', '')[:16]}")
                             self._watchdog_last_seen[agent_id] = now
                         except Exception as e:
                             logger.error(f"[watchdog] {agent_id} retrigger failed: {e}")
                         await asyncio.sleep(2.0)
+
+                # User agents — use deployer key for gas (triggerAgentDecision is onlyOwner)
+                for agent_id, agent_info in list(self.agents.items()):
+                    if not agent_info.get("is_user_agent"):
+                        continue
+                    agent_data = self._chain_metrics.get("agents", {}).get(agent_id, {})
+                    if agent_data.get("loop_stopped") or agent_id in self.paused_agents:
+                        continue
+                    last_seen = self._watchdog_last_seen.get(agent_id, 0.0)
+                    if last_seen > 0 and now - last_seen > STALL_SECONDS:
+                        logger.warning(f"[watchdog] user agent {agent_id} stalled — re-triggering")
+                        try:
+                            result = await self._coordinator.trigger_decision(
+                                agent_pk=settings.deployer_private_key, agent_id=agent_id
+                            )
+                            logger.info(f"[watchdog] {agent_id} retrigger tx={result.get('tx_hash', '')[:16]}")
+                            self._watchdog_last_seen[agent_id] = now
+                        except Exception as e:
+                            logger.error(f"[watchdog] user agent {agent_id} retrigger failed: {e}")
+                        await asyncio.sleep(2.0)
+
             await asyncio.sleep(15.0)
+
+    # ── User agent support ────────────────────────────────────────────────────────
+
+    def _reload_user_agents_from_db(self) -> None:
+        """Re-populate in-memory dicts from the on-chain event cache on startup."""
+        try:
+            from agents.user_agents_db import UserAgentsDB
+            for record in UserAgentsDB().load():
+                agent_id = record["agent_id"]
+                if agent_id in self.agents:
+                    continue  # already known
+                self.agents[agent_id] = {
+                    "agent_id":      agent_id,
+                    "agent_name":    record.get("name", agent_id),
+                    "wallet_address": "",   # user agents have no dedicated wallet
+                    "owner_address": record.get("owner_address", ""),
+                    "icon":          record.get("icon", "🤖"),
+                    "risk_level":    record.get("risk_level", 3),
+                    "is_user_agent": True,
+                }
+                entry = self._empty_agent_metrics(agent_id)
+                entry["agent_name"] = record.get("name", agent_id)
+                self._chain_metrics["agents"][agent_id] = entry
+                logger.info(f"Reloaded user agent from DB: {agent_id}")
+        except Exception as e:
+            logger.warning(f"_reload_user_agents_from_db failed: {e}")
+
+    async def _on_user_agent_registered(
+        self, agent_id: str, owner: str, name: str, icon: str = "🤖", risk_level: int = 3
+    ) -> None:
+        """Called when a new AgentOwnerSet event is detected on-chain."""
+        try:
+            from agents.user_agents_db import UserAgentsDB
+            UserAgentsDB().upsert_from_event(agent_id, owner, name, icon, risk_level)
+        except Exception as e:
+            logger.warning(f"Could not persist user agent {agent_id}: {e}")
+
+        # Register in orchestrator memory
+        if agent_id not in self.agents:
+            self.agents[agent_id] = {
+                "agent_id":      agent_id,
+                "agent_name":    name,
+                "wallet_address": "",
+                "owner_address": owner.lower(),
+                "icon":          icon,
+                "risk_level":    risk_level,
+                "is_user_agent": True,
+            }
+        if agent_id not in self._chain_metrics["agents"]:
+            entry = self._empty_agent_metrics(agent_id)
+            entry["agent_name"] = name
+            self._chain_metrics["agents"][agent_id] = entry
+
+        logger.info(f"User agent registered: {agent_id} (owner={owner})")
+
+        # Kick off the on-chain loop using deployer key for gas (triggerAgentDecision has no onlyOwner)
+        if self._coordinator:
+            try:
+                result = await self._coordinator.trigger_decision(
+                    agent_pk=settings.deployer_private_key,
+                    agent_id=agent_id,
+                )
+                self._watchdog_last_seen[agent_id] = time.time()
+                logger.info(f"User agent {agent_id} initial trigger tx={result.get('tx_hash', '')[:16]}")
+            except Exception as e:
+                logger.error(f"User agent {agent_id} initial trigger failed: {e}")
 
     def get_agent_states(self) -> dict:
         return self._chain_metrics.get("agents", {})

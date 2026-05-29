@@ -33,6 +33,8 @@ function makeDefaultAgent(agent_id: AgentState['agent_id'], agent_name: string):
     total_sell_volume: 0,
     avg_decision_latency_ms: 0,
     decision_latency_count: 0,
+    agt_balance: 0,
+    quote_balance: 0,
     net_position: 0,
     unrealized_pnl: 0,
     wallet_address: '',

@@ -30,12 +30,19 @@ contract Exchange {
     }
 
     IERC20 public token;
+    IERC20 public quoteToken;
+    address public exchangeOwner;
 
     uint256 private _nextOrderId = 1;
     uint256 private _nextTradeId = 1;
 
-    constructor(address _token) {
+    // QUOTE locked per BUY order — released to seller on fill, refunded on cancel
+    mapping(uint256 => uint256) private _lockedQuote;
+
+    constructor(address _token, address _quoteToken) {
         token = IERC20(_token);
+        quoteToken = IERC20(_quoteToken);
+        exchangeOwner = msg.sender;
     }
 
     // Last matched trade price — read by Python backend for real price discovery
@@ -83,7 +90,12 @@ contract Exchange {
         });
         _agentOrderIds[msg.sender].push(orderId);
 
-        if (!isBuy) {
+        if (isBuy) {
+            uint256 quoteAmount = price * amount / 1e18;
+            require(quoteAmount > 0, "Quote amount too small");
+            require(quoteToken.transferFrom(msg.sender, address(this), quoteAmount), "QUOTE transfer failed");
+            _lockedQuote[orderId] = quoteAmount;
+        } else {
             require(token.transferFrom(msg.sender, address(this), amount), "Token transfer failed");
         }
 
@@ -167,17 +179,25 @@ contract Exchange {
         require(order.active, "Order not active");
         require(order.agent == msg.sender, "Not your order");
 
-        if (!order.isBuy) {
-            uint256 remaining = order.amount - order.filled;
-            if (remaining > 0) token.transfer(order.agent, remaining);
-        }
-
+        // CEI: deactivate before any external calls
         order.active = false;
         if (order.isBuy) {
             _removeFromBook(_activeBuyIds, orderId);
         } else {
             _removeFromBook(_activeSellIds, orderId);
         }
+
+        if (order.isBuy) {
+            uint256 locked = _lockedQuote[orderId];
+            if (locked > 0) {
+                _lockedQuote[orderId] = 0;
+                require(quoteToken.transfer(order.agent, locked), "QUOTE refund failed");
+            }
+        } else {
+            uint256 remaining = order.amount - order.filled;
+            if (remaining > 0) require(token.transfer(order.agent, remaining), "sETH refund failed");
+        }
+
         emit OrderCancelled(orderId, msg.sender);
     }
 
@@ -274,7 +294,27 @@ contract Exchange {
 
         emit TradeExecuted(tradeId, buyId, sellId, buyer, seller, fillPrice, fill);
 
-        token.transfer(buyer, fill);
+        // sETH to buyer (from seller's escrow)
+        require(token.transfer(buyer, fill), "sETH transfer failed");
+
+        // QUOTE to seller — proportional to fill; drain remainder on last fill to avoid dust
+        uint256 totalLocked = _lockedQuote[buyId];
+        if (totalLocked > 0) {
+            uint256 quoteForFill = (orders[buyId].filled >= orders[buyId].amount)
+                ? totalLocked
+                : totalLocked * fill / orders[buyId].amount;
+            if (quoteForFill > 0) {
+                _lockedQuote[buyId] -= quoteForFill;
+                require(quoteToken.transfer(seller, quoteForFill), "QUOTE transfer failed");
+            }
+        }
+    }
+
+    // ── Emergency recovery (owner-only) ─────────────────────────────────────────
+
+    function emergencyWithdrawToken(address tokenAddr, uint256 amount) external {
+        require(msg.sender == exchangeOwner, "Not owner");
+        require(IERC20(tokenAddr).transfer(exchangeOwner, amount), "Transfer failed");
     }
 
     function _removeAt(uint256[] storage arr, uint256 index) internal {

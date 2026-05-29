@@ -13,6 +13,8 @@
 - [ ] Somnia explorer opens correctly when tx hash is clicked
 - [ ] Chart is rendering live candles (not frozen)
 - [ ] Activity feed is scrolling with new entries
+- [ ] MetaMask is installed and connected to Somnia testnet (chain 50312)
+- [ ] Demo wallet has a small STT balance (for live user agent creation during demo)
 
 If chain metrics are blank: wait 30s after startup for the first coordinator event poll cycle. If still blank, verify contract addresses are set in `backend/.env` and the coordinator has sufficient STT balance.
 
@@ -111,6 +113,38 @@ Watch agents scramble — activity feed lights up.
 
 ---
 
+## Minute 3:30 — Show composable user agents
+
+Click the **MY AGENTS** tab in the right sidebar.
+
+> "Now for something that shows how open this is. I'm going to deploy my own agent — right now, live."
+
+Click **CREATE AGENT**. Fill in a name (e.g. "Contrarian Bot") and a strategy prompt:
+
+> `"You are a contrarian agent. When the majority of peers buy, you sell. When they sell, you buy. Respond with exactly one word: BUY, SELL, or HOLD."`
+
+Click **Deploy Agent On-Chain**. MetaMask popup appears.
+
+> "This is one MetaMask transaction calling `registerAgent()` on the `AgentRegistry` contract. My wallet's address is recorded on-chain as the agent owner. The registry configures the coordinator directly — the backend has no involvement at all."
+
+_Wait for tx confirmation (~1s on Somnia)._
+
+> "Done. The backend just detected an `AgentRegistered` event from the registry and automatically started the LLM loop for my new agent."
+
+Click **Fund Agent**, enter 0.1 STT, sign the transaction.
+
+> "Now I'm sending STT directly to the coordinator contract to pay for LLM inference. My agent is now competing with the 5 system agents — using a completely different strategy I just wrote."
+
+Wait ~5s. The card appears with `ACTIVE` status.
+
+> "This is composable AI. Anyone can define an agent strategy and deploy it. The ownership is enforced on-chain — only my wallet can pause or resume this agent. I can do it right now."
+
+Click **PAUSE** on the user agent card.
+
+> "One MetaMask transaction. `AgentRegistry.pauseAgent()` checks `agents[agentId].agentOwner == msg.sender` and then tells the coordinator to pause. No backend permission system needed."
+
+---
+
 ## Minute 4:00 — Tie it back to Somnia
 
 > "Why Somnia? Two things no other chain can do."
@@ -138,8 +172,11 @@ Watch agents scramble — activity feed lights up.
 - **"Is this simulated?"** → No. Every tx hash links to a real Somnia explorer entry. The price engine is GBM-based (for smooth animation), but when onchain, it anchors to real fill prices from Exchange.sol every 5 seconds. All orders and trades are onchain.
 - **"Does Python keep calling the contract every loop?"** → No. Python fires one `triggerAgentDecision()` per agent at startup — that's it. After that, `handleDecision()` calls `_retrigger()` at the end of each cycle to fire the next one on-chain. The backend's only remaining jobs are the WebSocket dashboard and the event injection buttons.
 - **"What happens if the coordinator runs out of STT?"** → It emits `LoopStopped(agentId, "Insufficient balance", balance)` and stops gracefully. No crash. You can pause individual agents to conserve STT, or fund the coordinator via `POST /coordinator/fund` and restart loops via the dashboard's admin controls.
-- **"How do you control the agents during a demo?"** → The Header has admin controls (visible only to the deployer wallet). PAUSE ALL halts all 4 on-chain agents at their next `_retrigger()` cycle without wasting STT. RESUME ALL restarts them. FUND ALL mints AGT to agents for sell-side liquidity. All actions require a MetaMask signature so only the deployer can trigger them.
+- **"How do you control the agents during a demo?"** → The Header has admin controls (visible only to the deployer wallet). PAUSE ALL halts all 4 on-chain agents at their next `_retrigger()` cycle without wasting STT. RESUME ALL restarts them. FUND ALL mints sETH to agents for sell-side liquidity. All actions require a MetaMask signature so only the deployer can trigger them.
 - **"What is the `⬡ ON-CHAIN LLM` badge?"** → Each agent card shows this badge indicating the agent's decisions are validated by Somnia's decentralized LLM inference agent — multi-validator consensus, fully on-chain. The Agent Scoreboard below shows real-time P&L ranking.
 - **"What model powers the agents?"** → Somnia's on-chain LLM Inference Agent (base agent ID 2) — multi-validator consensus across Somnia's decentralized network. Each agent's strategy system prompt is stored in `AgentCoordinator.systemPrompts` and set at deploy time.
 - **"How does agent coordination work?"** → Each agent uses a different strategy encoded in its on-chain system prompt. They don't communicate directly — they all react to the same on-chain market state (last trade price vs CoinGecko reference, best bid/ask). The interplay emerges naturally from their different strategies acting on the same data.
 - **"What happens if the coordinator runs out of fuel?"** → `_retrigger()` checks `address(this).balance >= deposit × 2` before firing the next cycle. If underfunded, it emits `LoopStopped(agentId, "Insufficient balance", balance)` and halts gracefully. Fund via `AgentCoordinator.fund()` and restart.
+- **"Who can create a user agent?"** → Anyone with a MetaMask wallet on Somnia testnet. `AgentRegistry.registerAgent()` is a public function — no deployer permission required. The agent ID just needs to be unique (the frontend generates a random suffix). After creation, only that wallet can pause/resume via `AgentRegistry.pauseAgent/resumeAgent`.
+- **"Does the backend store anything private for user agents?"** → No. No private keys, no signatures. The backend caches the agent's name and owner address from the on-chain event for the `GET /user/agents` endpoint — that's all. Pause/resume/fund are direct wallet transactions that never touch the backend.
+- **"What's the strategy prompt for?"** → It's passed as the `system` parameter to Somnia's `inferString()` call — exactly the same as the system prompts for the five built-in agents. It shapes how the LLM validators interpret the market context and choose BUY/SELL/HOLD. It's stored on-chain in `AgentCoordinator.systemPrompts[agentId]` and emitted in every `LLMRequestFired` event.

@@ -45,14 +45,48 @@ def _load_abis():
         {"inputs": [{"name": "agent", "type": "address"}], "name": "getBalance", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
         {"inputs": [], "name": "totalLocked", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
     ]
+    # Unified AgentRegistry — string-ID keyed, handles system + user agents
     _ABIS["AgentRegistry"] = [
-        {"inputs": [{"name": "agent", "type": "address"}], "name": "getAgent", "outputs": [{"components": [{"name": "wallet", "type": "address"}, {"name": "name", "type": "string"}, {"name": "strategy", "type": "string"}, {"name": "reputation", "type": "int256"}, {"name": "tradesExecuted", "type": "uint256"}, {"name": "registeredAt", "type": "uint256"}, {"name": "active", "type": "bool"}], "name": "", "type": "tuple"}], "stateMutability": "view", "type": "function"},
-        {"inputs": [], "name": "getAllAgents", "outputs": [{"name": "", "type": "address[]"}], "stateMutability": "view", "type": "function"},
-        {"inputs": [{"name": "agent", "type": "address"}], "name": "isRegistered", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
-        {"inputs": [{"name": "agent", "type": "address"}], "name": "incrementTrades", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-        {"inputs": [{"name": "agent", "type": "address"}, {"name": "delta", "type": "int256"}], "name": "updateReputation", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-        {"inputs": [{"name": "agent", "type": "address"}, {"name": "active", "type": "bool"}], "name": "setActive", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
-        {"anonymous": False, "inputs": [{"indexed": True, "name": "agent", "type": "address"}, {"indexed": False, "name": "active", "type": "bool"}], "name": "AgentActiveUpdated", "type": "event"},
+        {"inputs": [
+            {"name": "agentId", "type": "string"}, {"name": "name", "type": "string"},
+            {"name": "icon", "type": "string"}, {"name": "riskLevel", "type": "uint8"},
+            {"name": "systemPrompt", "type": "string"}, {"name": "priceUrl", "type": "string"},
+            {"name": "selector", "type": "string"}, {"name": "decimals", "type": "uint8"},
+        ], "name": "registerAgent", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "pauseAgent", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "resumeAgent", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "isRegistered", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "getSystemPrompt", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "getPriceConfig", "outputs": [{"name": "priceUrl", "type": "string"}, {"name": "selector", "type": "string"}, {"name": "decimals", "type": "uint8"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "getRiskLevel", "outputs": [{"name": "", "type": "uint8"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "getAllAgentIds", "outputs": [{"name": "", "type": "string[]"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "_owner", "type": "address"}], "name": "getAgentsByOwner", "outputs": [{"name": "", "type": "string[]"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "", "type": "string"}], "name": "agents", "outputs": [
+            {"name": "agentOwner", "type": "address"}, {"name": "name", "type": "string"},
+            {"name": "icon", "type": "string"}, {"name": "riskLevel", "type": "uint8"},
+            {"name": "createdAt", "type": "uint256"}, {"name": "active", "type": "bool"},
+        ], "stateMutability": "view", "type": "function"},
+        {"anonymous": False, "inputs": [
+            {"indexed": True,  "name": "agentId",    "type": "string"},
+            {"indexed": True,  "name": "agentOwner", "type": "address"},
+            {"indexed": False, "name": "name",       "type": "string"},
+            {"indexed": False, "name": "icon",       "type": "string"},
+            {"indexed": False, "name": "riskLevel",  "type": "uint8"},
+        ], "name": "AgentRegistered", "type": "event"},
+        {"anonymous": False, "inputs": [{"indexed": True, "name": "agentId", "type": "string"}, {"indexed": True, "name": "caller", "type": "address"}], "name": "AgentPaused", "type": "event"},
+        {"anonymous": False, "inputs": [{"indexed": True, "name": "agentId", "type": "string"}, {"indexed": True, "name": "caller", "type": "address"}], "name": "AgentResumed", "type": "event"},
+    ]
+    _ABIS["QuoteToken"] = [
+        {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "mint", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [], "name": "faucet", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "spender", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "approve", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "from", "type": "address"}, {"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "transferFrom", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "totalSupply", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "symbol", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
+        {"anonymous": False, "inputs": [{"indexed": True, "name": "from", "type": "address"}, {"indexed": True, "name": "to", "type": "address"}, {"indexed": False, "name": "value", "type": "uint256"}], "name": "Transfer", "type": "event"},
     ]
     _ABIS["AgentToken"] = [
         {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "mint", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
@@ -74,6 +108,7 @@ def _load_abis():
         {"inputs": [{"name": "", "type": "string"}], "name": "winStreak", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
         {"inputs": [{"name": "", "type": "string"}], "name": "lastDecision", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
         {"inputs": [{"name": "", "type": "string"}], "name": "agentPaused", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [{"name": "agentId", "type": "string"}], "name": "addAgentToList", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "requestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}], "name": "DecisionTriggered", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "llmRequestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}, {"indexed": False, "name": "fetchedPrice", "type": "uint256"}, {"indexed": False, "name": "context", "type": "string"}], "name": "LLMRequestFired", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "requestId", "type": "uint256"}, {"indexed": False, "name": "agentId", "type": "string"}, {"indexed": False, "name": "decision", "type": "string"}, {"indexed": False, "name": "price", "type": "uint256"}, {"indexed": False, "name": "orderId", "type": "uint256"}, {"indexed": False, "name": "streak", "type": "uint256"}], "name": "DecisionExecuted", "type": "event"},
@@ -301,7 +336,10 @@ class TreasuryContract:
 
 
 class AgentRegistryContract:
-    """On-chain agent discovery and reputation tracking."""
+    """
+    Unified agent registry — string-ID keyed.
+    Handles ALL agents (system agents owned by deployer, user agents owned by their wallets).
+    """
 
     def __init__(self, address: str, rpc_url: str):
         self.address = address
@@ -312,66 +350,166 @@ class AgentRegistryContract:
             abi=_ABIS.get("AgentRegistry", []),
         )
 
-    async def get_all_agents(self) -> list[str]:
+    async def get_all_agent_ids(self) -> list[str]:
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(
-                None, lambda: self._contract.functions.getAllAgents().call()
+                None, lambda: self._contract.functions.getAllAgentIds().call()
             )
             return [str(a) for a in result]
         except Exception as e:
-            logger.debug(f"AgentRegistry.getAllAgents failed: {e}")
+            logger.debug(f"AgentRegistry.getAllAgentIds failed: {e}")
             return []
 
-    async def get_agent(self, agent_address: str) -> dict:
+    async def get_agent(self, agent_id: str) -> dict:
+        """Returns AgentInfo for a string agentId."""
         loop = asyncio.get_running_loop()
         try:
             raw = await loop.run_in_executor(
                 None,
-                lambda: self._contract.functions.getAgent(
-                    Web3.to_checksum_address(agent_address)
-                ).call(),
+                lambda: self._contract.functions.agents(agent_id).call(),
             )
-            # tuple: (wallet, name, strategy, reputation, tradesExecuted, registeredAt, active)
+            # tuple: (agentOwner, name, icon, riskLevel, createdAt, active)
             return {
-                "wallet":         raw[0],
-                "name":           raw[1],
-                "strategy":       raw[2],
-                "reputation":     raw[3],
-                "tradesExecuted": raw[4],
-                "registeredAt":   raw[5],
-                "active":         raw[6],
+                "agentOwner": raw[0],
+                "name":       raw[1],
+                "icon":       raw[2],
+                "riskLevel":  raw[3],
+                "createdAt":  raw[4],
+                "active":     raw[5],
             }
         except Exception as e:
-            logger.debug(f"AgentRegistry.getAgent({agent_address}) failed: {e}")
+            logger.debug(f"AgentRegistry.agents({agent_id}) failed: {e}")
             return {}
 
-    async def increment_trades(self, deployer_pk: str, agent_address: str) -> None:
+    async def get_agents_by_owner(self, owner_address: str) -> list[str]:
+        loop = asyncio.get_running_loop()
         try:
-            data = self._contract.encode_abi(
-                "incrementTrades", args=[Web3.to_checksum_address(agent_address)]
+            result = await loop.run_in_executor(
+                None,
+                lambda: self._contract.functions.getAgentsByOwner(
+                    Web3.to_checksum_address(owner_address)
+                ).call(),
             )
-            await send_transaction(deployer_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+            return [str(a) for a in result]
         except Exception as e:
-            logger.debug(f"AgentRegistry.incrementTrades failed: {e}")
+            logger.debug(f"AgentRegistry.getAgentsByOwner failed: {e}")
+            return []
 
-    async def update_reputation(self, deployer_pk: str, agent_address: str, delta: int) -> None:
+    async def get_agent_registered_events(self, from_block: int) -> list[dict]:
+        """Poll AgentRegistered events — used to discover newly registered agents."""
+        loop = asyncio.get_running_loop()
         try:
-            data = self._contract.encode_abi(
-                "updateReputation", args=[Web3.to_checksum_address(agent_address), delta]
+            events = await loop.run_in_executor(
+                None,
+                lambda: self._contract.events.AgentRegistered.get_logs(
+                    from_block=from_block, to_block="latest"
+                ),
             )
-            await send_transaction(deployer_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+            return [
+                {
+                    "agentId":    e["args"]["agentId"],
+                    "agentOwner": e["args"]["agentOwner"],
+                    "name":       e["args"]["name"],
+                    "icon":       e["args"]["icon"],
+                    "riskLevel":  int(e["args"]["riskLevel"]),
+                    "block":      e["blockNumber"],
+                }
+                for e in events
+            ]
         except Exception as e:
-            logger.debug(f"AgentRegistry.updateReputation failed: {e}")
+            logger.debug(f"AgentRegistered event poll failed: {e}")
+            return []
 
-    async def set_active(self, deployer_pk: str, agent_address: str, active: bool) -> None:
+    async def get_system_prompt(self, agent_id: str) -> str:
+        loop = asyncio.get_running_loop()
         try:
-            data = self._contract.encode_abi(
-                "setActive", args=[Web3.to_checksum_address(agent_address), active]
+            return str(await loop.run_in_executor(
+                None, lambda: self._contract.functions.getSystemPrompt(agent_id).call()
+            ))
+        except Exception as e:
+            logger.debug(f"AgentRegistry.getSystemPrompt({agent_id}) failed: {e}")
+            return ""
+
+    async def get_price_config(self, agent_id: str) -> dict:
+        loop = asyncio.get_running_loop()
+        try:
+            raw = await loop.run_in_executor(
+                None, lambda: self._contract.functions.getPriceConfig(agent_id).call()
             )
+            return {"priceUrl": raw[0], "selector": raw[1], "decimals": raw[2]}
+        except Exception as e:
+            logger.debug(f"AgentRegistry.getPriceConfig({agent_id}) failed: {e}")
+            return {}
+
+    async def get_risk_level(self, agent_id: str) -> int:
+        loop = asyncio.get_running_loop()
+        try:
+            return int(await loop.run_in_executor(
+                None, lambda: self._contract.functions.getRiskLevel(agent_id).call()
+            ))
+        except Exception as e:
+            logger.debug(f"AgentRegistry.getRiskLevel({agent_id}) failed: {e}")
+            return 0
+
+    async def set_active(self, deployer_pk: str, agent_id: str, active: bool) -> None:
+        """Admin-only: toggle agent active flag."""
+        try:
+            data = self._contract.encode_abi("setActive", args=[agent_id, active])
             await send_transaction(deployer_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
         except Exception as e:
             logger.debug(f"AgentRegistry.setActive failed: {e}")
+
+
+class QuoteTokenContract:
+    """USDC-equivalent testnet stablecoin — buyers lock QUOTE on BUY orders, sellers receive QUOTE on fill."""
+
+    def __init__(self, address: str, rpc_url: str):
+        self.address = address
+        self.rpc_url = rpc_url
+        w3 = get_web3(rpc_url)
+        self._contract = w3.eth.contract(
+            address=Web3.to_checksum_address(address),
+            abi=_ABIS.get("QuoteToken", []),
+        )
+
+    async def get_balance(self, address: str) -> float:
+        loop = asyncio.get_running_loop()
+        try:
+            balance_wei = await loop.run_in_executor(
+                None,
+                lambda: self._contract.functions.balanceOf(
+                    Web3.to_checksum_address(address)
+                ).call(),
+            )
+            return float(Web3.from_wei(balance_wei, "ether"))
+        except Exception as e:
+            logger.debug(f"QuoteToken.balanceOf({address}) failed: {e}")
+            return 0.0
+
+    async def mint(self, owner_pk: str, to_address: str, amount_tokens: float) -> dict:
+        """Owner-only: mint QUOTE to an address (used for auto-replenishment)."""
+        amount_wei = int(amount_tokens * 1e18)
+        data = self._contract.encode_abi("mint", args=[Web3.to_checksum_address(to_address), amount_wei])
+        tx_hash = await send_transaction(owner_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+        return {"tx_hash": tx_hash, "to": to_address, "amount": amount_tokens}
+
+    async def faucet(self, caller_pk: str) -> dict:
+        """Permissionless: mints FAUCET_AMOUNT QUOTE to caller's own address."""
+        data = self._contract.encode_abi("faucet", args=[])
+        tx_hash = await send_transaction(caller_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+        return {"tx_hash": tx_hash}
+
+    async def get_total_supply(self) -> float:
+        loop = asyncio.get_running_loop()
+        try:
+            supply_wei = await loop.run_in_executor(
+                None, lambda: self._contract.functions.totalSupply().call()
+            )
+            return float(Web3.from_wei(supply_wei, "ether"))
+        except Exception as e:
+            logger.debug(f"QuoteToken.totalSupply failed: {e}")
+            return 0.0
 
 
 class AgentCoordinatorContract:
@@ -504,6 +642,7 @@ class AgentCoordinatorContract:
             ("CoalitionFormed",   self._contract.events.CoalitionFormed),
             ("AgentPaused",       self._contract.events.AgentPaused),
             ("AgentResumed",      self._contract.events.AgentResumed),
+            ("AgentOwnerSet",     self._contract.events.AgentOwnerSet),
         ]
 
         for name, event_cls in event_types:
@@ -521,6 +660,30 @@ class AgentCoordinatorContract:
 
         results.sort(key=lambda x: x["block"])
         return results
+
+
+    async def get_agent_owner_set_events(self, from_block: int) -> list[dict]:
+        """Poll AgentOwnerSet events — used to discover newly registered user agents."""
+        loop = asyncio.get_running_loop()
+        try:
+            events = await loop.run_in_executor(
+                None,
+                lambda: self._contract.events.AgentOwnerSet.get_logs(
+                    from_block=from_block, to_block="latest"
+                ),
+            )
+            return [
+                {
+                    "agent_id": e["args"]["agentId"],
+                    "owner":    e["args"]["owner"],
+                    "name":     e["args"]["name"],
+                    "block":    e["blockNumber"],
+                }
+                for e in events
+            ]
+        except Exception as e:
+            logger.debug(f"AgentOwnerSet event poll failed: {e}")
+            return []
 
 
 class AgentTokenContract:

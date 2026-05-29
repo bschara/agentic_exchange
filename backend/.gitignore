@@ -1,4 +1,5 @@
 .env
+# .env.example is intentionally tracked — it's a template with no secrets
 
 # Python
 __pycache__/
