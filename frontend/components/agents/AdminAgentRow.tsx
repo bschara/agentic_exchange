@@ -101,7 +101,7 @@ export function AdminAgentRow({
 
         <button
           onClick={() => setShowFund((v) => !v)}
-          title="Fund (mint AGT)"
+          title="Fund (mint sETH)"
           className="px-2 py-1 text-[10px] font-bold border border-blue-500/40 text-blue-400 rounded bg-blue-500/10 hover:bg-blue-500/20 transition-all"
         >
           <Coins className="w-3 h-3" />

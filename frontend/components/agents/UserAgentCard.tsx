@@ -97,7 +97,7 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
       {m && (
         <div className="grid grid-cols-4 gap-1.5 text-center">
           <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">AGT</p>
+            <p className="text-[10px] text-gray-500">sETH</p>
             <p className="text-[10px] font-mono font-bold text-white">{(m.agt_balance ?? 0).toFixed(2)}</p>
           </div>
           <div className="bg-white/5 rounded-lg px-1.5 py-1.5">

@@ -132,6 +132,12 @@ contract AgentRegistry {
 
     function setActive(string calldata agentId, bool active) external onlyContractOwner {
         agents[agentId].active = active;
+        // Propagate to coordinator so the on-chain loop actually stops/resumes
+        if (!active) {
+            IAgentCoordinator(coordinator).pauseAgent(agentId);
+        } else {
+            IAgentCoordinator(coordinator).resumeAgent(agentId);
+        }
     }
 
     // ── Config getters (read by AgentCoordinator on each decision cycle) ──────

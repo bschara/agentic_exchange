@@ -76,6 +76,18 @@ def _load_abis():
         {"anonymous": False, "inputs": [{"indexed": True, "name": "agentId", "type": "string"}, {"indexed": True, "name": "caller", "type": "address"}], "name": "AgentPaused", "type": "event"},
         {"anonymous": False, "inputs": [{"indexed": True, "name": "agentId", "type": "string"}, {"indexed": True, "name": "caller", "type": "address"}], "name": "AgentResumed", "type": "event"},
     ]
+    _ABIS["QuoteToken"] = [
+        {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "mint", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [], "name": "faucet", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "spender", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "approve", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "from", "type": "address"}, {"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "transferFrom", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
+        {"inputs": [{"name": "", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "totalSupply", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
+        {"inputs": [], "name": "symbol", "outputs": [{"name": "", "type": "string"}], "stateMutability": "view", "type": "function"},
+        {"anonymous": False, "inputs": [{"indexed": True, "name": "from", "type": "address"}, {"indexed": True, "name": "to", "type": "address"}, {"indexed": False, "name": "value", "type": "uint256"}], "name": "Transfer", "type": "event"},
+    ]
     _ABIS["AgentToken"] = [
         {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "mint", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
         {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}], "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
@@ -447,6 +459,57 @@ class AgentRegistryContract:
             await send_transaction(deployer_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
         except Exception as e:
             logger.debug(f"AgentRegistry.setActive failed: {e}")
+
+
+class QuoteTokenContract:
+    """USDC-equivalent testnet stablecoin — buyers lock QUOTE on BUY orders, sellers receive QUOTE on fill."""
+
+    def __init__(self, address: str, rpc_url: str):
+        self.address = address
+        self.rpc_url = rpc_url
+        w3 = get_web3(rpc_url)
+        self._contract = w3.eth.contract(
+            address=Web3.to_checksum_address(address),
+            abi=_ABIS.get("QuoteToken", []),
+        )
+
+    async def get_balance(self, address: str) -> float:
+        loop = asyncio.get_running_loop()
+        try:
+            balance_wei = await loop.run_in_executor(
+                None,
+                lambda: self._contract.functions.balanceOf(
+                    Web3.to_checksum_address(address)
+                ).call(),
+            )
+            return float(Web3.from_wei(balance_wei, "ether"))
+        except Exception as e:
+            logger.debug(f"QuoteToken.balanceOf({address}) failed: {e}")
+            return 0.0
+
+    async def mint(self, owner_pk: str, to_address: str, amount_tokens: float) -> dict:
+        """Owner-only: mint QUOTE to an address (used for auto-replenishment)."""
+        amount_wei = int(amount_tokens * 1e18)
+        data = self._contract.encode_abi("mint", args=[Web3.to_checksum_address(to_address), amount_wei])
+        tx_hash = await send_transaction(owner_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+        return {"tx_hash": tx_hash, "to": to_address, "amount": amount_tokens}
+
+    async def faucet(self, caller_pk: str) -> dict:
+        """Permissionless: mints FAUCET_AMOUNT QUOTE to caller's own address."""
+        data = self._contract.encode_abi("faucet", args=[])
+        tx_hash = await send_transaction(caller_pk, self.address, bytes.fromhex(data[2:]), rpc_url=self.rpc_url)
+        return {"tx_hash": tx_hash}
+
+    async def get_total_supply(self) -> float:
+        loop = asyncio.get_running_loop()
+        try:
+            supply_wei = await loop.run_in_executor(
+                None, lambda: self._contract.functions.totalSupply().call()
+            )
+            return float(Web3.from_wei(supply_wei, "ether"))
+        except Exception as e:
+            logger.debug(f"QuoteToken.totalSupply failed: {e}")
+            return 0.0
 
 
 class AgentCoordinatorContract:

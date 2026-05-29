@@ -45,6 +45,12 @@ const DECISION_COLORS: Record<string, string> = {
 const explorerBase =
   process.env.NEXT_PUBLIC_SOMNIA_EXPLORER || 'https://shannon-explorer.somnia.network';
 
+function fmtBalance(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
+  return n.toFixed(2);
+}
+
 function agentStatus(agent: AgentState): AgentStatus {
   if (agent.loop_stopped) return 'STOPPED';
   if (agent.decisions_total > 0 || agent.orders_placed > 0) return 'ACTIVE';
@@ -95,14 +101,24 @@ export function AgentCard({ agent }: { agent: AgentState }) {
         {AGENT_STRATEGIES[agent.agent_id]}
       </p>
 
-      {/* Stats row */}
-      <div className="grid grid-cols-4 gap-1.5 text-center">
+      {/* Balances row */}
+      <div className="grid grid-cols-2 gap-1.5 text-center">
         <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-          <p className="text-[10px] text-gray-500">AGT</p>
+          <p className="text-[10px] text-gray-500">sETH inventory</p>
           <p className="text-[10px] font-mono font-bold text-white">
-            {(agent.agt_balance ?? 0).toFixed(2)}
+            {(agent.agt_balance ?? 0).toFixed(3)}
           </p>
         </div>
+        <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+          <p className="text-[10px] text-gray-500">USDC cash</p>
+          <p className="text-[10px] font-mono font-bold text-emerald-400">
+            ${fmtBalance(agent.quote_balance ?? 0)}
+          </p>
+        </div>
+      </div>
+
+      {/* Stats row */}
+      <div className="grid grid-cols-3 gap-1.5 text-center">
         <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
           <p className="text-[10px] text-gray-500">Last</p>
           <p className={`text-[10px] font-mono font-bold ${lastDecisionColor}`}>

@@ -23,16 +23,23 @@ async function main() {
   const balance = await hre.ethers.provider.getBalance(deployer.address);
   console.log('Balance:', hre.ethers.formatEther(balance), 'STT');
 
-  // Deploy AgentToken (mintable ERC20 for on-chain P&L settlement)
+  // Deploy AgentToken (sETH — Somnia synthetic ETH)
   const AgentToken = await hre.ethers.getContractFactory('AgentToken');
-  const token = await AgentToken.deploy('AgentToken', 'AGT');
+  const token = await AgentToken.deploy('Somnia ETH', 'sETH');
   await token.waitForDeployment();
   const tokenAddr = await token.getAddress();
   console.log('AgentToken deployed to:', tokenAddr);
 
-  // Deploy Exchange with token address (locks AGT on SELL, settles on fill)
+  // Deploy QuoteToken (USDC-equivalent — payment currency for BUY orders)
+  const QuoteToken = await hre.ethers.getContractFactory('QuoteToken');
+  const quoteToken = await QuoteToken.deploy();
+  await quoteToken.waitForDeployment();
+  const quoteTokenAddr = await quoteToken.getAddress();
+  console.log('QuoteToken deployed to:', quoteTokenAddr);
+
+  // Deploy Exchange (sETH/USDC market — locks USDC on BUY, sETH on SELL)
   const Exchange = await hre.ethers.getContractFactory('Exchange');
-  const exchange = await Exchange.deploy(tokenAddr);
+  const exchange = await Exchange.deploy(tokenAddr, quoteTokenAddr);
   await exchange.waitForDeployment();
   const exchangeAddr = await exchange.getAddress();
   console.log('Exchange deployed to:', exchangeAddr);
@@ -139,17 +146,31 @@ async function main() {
   await fundTx.wait();
   console.log(`AgentCoordinator funded with ${hre.ethers.formatEther(coordinatorFund)} STT`);
 
-  // Mint 10M AGT to coordinator (pool for all 4 main agents)
+  // Mint 10M sETH to coordinator (pool for all main agents)
   const COORDINATOR_MINT = hre.ethers.parseEther('10000000');
   await (await token.mint(coordinatorAddr, COORDINATOR_MINT)).wait();
-  console.log('Minted 10M AGT to AgentCoordinator');
+  console.log('Minted 10M sETH to AgentCoordinator');
 
-  // Coordinator approves Exchange (max allowance — coordinator holds the shared pool)
+  // Coordinator approves Exchange for both sETH and USDC
   await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
-  console.log('AgentCoordinator approved Exchange for AGT');
+  console.log('AgentCoordinator approved Exchange for sETH');
+
+  // Mint 10M QUOTE to coordinator (for BUY orders)
+  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('10000000'))).wait();
+  console.log('Minted 10M QUOTE to AgentCoordinator');
+  await (await coordinator.approveToken(quoteTokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log('AgentCoordinator approved Exchange for QUOTE');
+
+  // Mint 10M QUOTE to noise_trader wallet if address provided via env
+  const noiseTraderAddr = process.env.NOISE_TRADER_ADDRESS || '';
+  if (noiseTraderAddr && hre.ethers.isAddress(noiseTraderAddr)) {
+    await (await quoteToken.mint(noiseTraderAddr, hre.ethers.parseEther('10000000'))).wait();
+    console.log(`Minted 10M QUOTE to noise_trader (${noiseTraderAddr})`);
+  }
 
   // Read ABIs from artifacts
   const tokenArtifact       = await hre.artifacts.readArtifact('AgentToken');
+  const quoteArtifact       = await hre.artifacts.readArtifact('QuoteToken');
   const exchangeArtifact    = await hre.artifacts.readArtifact('Exchange');
   const registryArtifact    = await hre.artifacts.readArtifact('AgentRegistry');
   const treasuryArtifact    = await hre.artifacts.readArtifact('Treasury');
@@ -161,6 +182,7 @@ async function main() {
     deployer: deployer.address,
     contracts: {
       AgentToken:       { address: tokenAddr },
+      QuoteToken:       { address: quoteTokenAddr },
       Exchange:         { address: exchangeAddr },
       AgentRegistry:    { address: registryAddr },
       Treasury:         { address: treasuryAddr },
@@ -168,6 +190,7 @@ async function main() {
     },
     abis: {
       AgentToken:       tokenArtifact.abi,
+      QuoteToken:       quoteArtifact.abi,
       Exchange:         exchangeArtifact.abi,
       AgentRegistry:    registryArtifact.abi,
       Treasury:         treasuryArtifact.abi,
@@ -190,6 +213,7 @@ async function main() {
 
   console.log('\n─── Add to backend/.env ───────────────────────────────');
   console.log(`AGENT_TOKEN_ADDRESS=${tokenAddr}`);
+  console.log(`QUOTE_TOKEN_ADDRESS=${quoteTokenAddr}`);
   console.log(`EXCHANGE_ADDRESS=${exchangeAddr}`);
   console.log(`AGENT_REGISTRY_ADDRESS=${registryAddr}`);
   console.log(`TREASURY_ADDRESS=${treasuryAddr}`);

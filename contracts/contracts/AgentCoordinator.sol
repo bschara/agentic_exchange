@@ -132,6 +132,8 @@ contract AgentCoordinator {
 
     // Tracks the last order placed per agent so stale orders can be cancelled before requoting
     mapping(string => uint256) public lastOrderId;
+    // Tracks the last BID order for market_maker (lastOrderId only tracks the ASK side)
+    mapping(string => uint256) public lastBidOrderId;
 
     string[] private _allowedValues;
 
@@ -241,7 +243,7 @@ contract AgentCoordinator {
     //
     // Reads price config from registry, fires Somnia JSON API price fetch.
     //
-    function triggerAgentDecision(string calldata agentId) external {
+    function triggerAgentDecision(string calldata agentId) external onlyOwner {
         require(IAgentRegistry(registry).isRegistered(agentId), "Agent not registered");
 
         uint256 deposit = platform.getRequestDeposit();
@@ -348,21 +350,30 @@ contract AgentCoordinator {
             return;
         }
 
-        // Cancel stale order from the previous cycle before placing a new one
+        // Cancel stale orders from the previous cycle before placing new ones
         uint256 prev = lastOrderId[req.agentId];
         if (prev > 0) {
             try exchange.cancelOrder(prev) {} catch {}
             lastOrderId[req.agentId] = 0;
         }
+        uint256 prevBid = lastBidOrderId[req.agentId];
+        if (prevBid > 0) {
+            try exchange.cancelOrder(prevBid) {} catch {}
+            lastBidOrderId[req.agentId] = 0;
+        }
 
         (, , uint8 decimals) = IAgentRegistry(registry).getPriceConfig(req.agentId);
-        uint256 basePrice = _toWei(req.fetchedPrice, decimals);
+        // Use on-chain sETH price when available; seed from ETH/USD oracle on first run
+        uint256 basePrice = exchange.hasTraded()
+            ? exchange.getLastTradePrice()
+            : _toWei(req.fetchedPrice, decimals);
 
         // Market maker posts both sides simultaneously to actually make markets.
         if (_strEq(req.agentId, "market_maker")) {
             uint256 bidPrice = basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
             uint256 askPrice = basePrice * (10000 + PRICE_OFFSET_BPS) / 10000;
             try exchange.placeOrder(true,  bidPrice, ORDER_AMOUNT_BASE) returns (uint256 bidId) {
+                lastBidOrderId[req.agentId] = bidId;
                 emit DecisionExecuted(requestId, req.agentId, "BUY",  bidPrice, bidId, 0);
             } catch {}
             try exchange.placeOrder(false, askPrice, ORDER_AMOUNT_BASE) returns (uint256 askId) {
@@ -515,8 +526,8 @@ contract AgentCoordinator {
             : "";
 
         string memory part1 = string(abi.encodePacked(
-            "ETH/USD: $", _uint2str(priceUsd),
-            ". Last trade: $", _uint2str(lastFillUsd),
+            "ETH oracle: $", _uint2str(priceUsd),
+            ". sETH last trade: $", _uint2str(lastFillUsd),
             ". Bid: $", bidOk ? _uint2str(bidUsd) : "none",
             ". Ask: $", askOk ? _uint2str(askUsd) : "none"
         ));

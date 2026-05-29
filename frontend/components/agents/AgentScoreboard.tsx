@@ -25,6 +25,12 @@ function pnlBg(pnl: number): string {
   return 'border-white/5';
 }
 
+function fmtBalance(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
+  return n.toFixed(2);
+}
+
 function fmt(n: number): string {
   const abs = Math.abs(n);
   const sign = n >= 0 ? '+' : '-';
@@ -55,13 +61,15 @@ export function AgentScoreboard() {
       </div>
 
       {ranked.map((agent, idx) => {
-        const realizedPnl = agent.trade_pnl ?? 0;
+        const realizedPnl   = agent.trade_pnl ?? 0;
         const unrealizedPnl = agent.unrealized_pnl ?? 0;
-        const pnl = realizedPnl + unrealizedPnl;
-        const buyVol  = agent.total_buy_volume ?? 0;
-        const sellVol = agent.total_sell_volume ?? 0;
-        const latency = agent.avg_decision_latency_ms ?? 0;
-        const hasTrades = buyVol + sellVol > 0;
+        const pnl           = realizedPnl + unrealizedPnl;
+        const buyVol        = agent.total_buy_volume ?? 0;
+        const sellVol       = agent.total_sell_volume ?? 0;
+        const latency       = agent.avg_decision_latency_ms ?? 0;
+        const quoteBalance  = agent.quote_balance ?? 0;
+        const hasTrades     = buyVol + sellVol > 0;
+        const hasPnl        = Math.abs(realizedPnl) > 0.01 || Math.abs(unrealizedPnl) > 0.01;
 
         return (
           <div
@@ -82,6 +90,11 @@ export function AgentScoreboard() {
               ) : (
                 <div className="text-[10px] text-gray-700">no fills yet</div>
               )}
+              {quoteBalance > 0 && (
+                <div className="text-[10px] text-gray-600 font-mono">
+                  💰 ${fmtBalance(quoteBalance)}
+                </div>
+              )}
             </div>
 
             {/* P&L */}
@@ -89,9 +102,11 @@ export function AgentScoreboard() {
               <div className={`text-sm font-mono font-bold ${pnlColor(pnl)}`}>
                 {fmt(pnl)}
               </div>
-              {Math.abs(unrealizedPnl) > 0.01 && (
-                <div className={`text-[10px] font-mono ${pnlColor(unrealizedPnl)}`}>
-                  {fmt(unrealizedPnl)} unrlzd
+              {hasPnl && (
+                <div className="text-[10px] font-mono text-gray-500">
+                  <span className={pnlColor(realizedPnl)}>R {fmt(realizedPnl)}</span>
+                  {' / '}
+                  <span className={pnlColor(unrealizedPnl)}>U {fmt(unrealizedPnl)}</span>
                 </div>
               )}
               {latency > 0 && (

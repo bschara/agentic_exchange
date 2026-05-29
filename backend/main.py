@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import settings
+from config import settings, validate_settings
 from api.websocket_hub import ConnectionManager
 from api.routes_ws import router as ws_router, init_routes
 from api.routes_http import router as http_router, init_http_routes
@@ -20,6 +20,7 @@ orchestrator = AgentOrchestrator(hub)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_settings()
     init_routes(hub, orchestrator)
     init_http_routes(hub, orchestrator, orchestrator._state_bus)
     init_user_agent_routes(hub, orchestrator)

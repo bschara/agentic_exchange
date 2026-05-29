@@ -1,6 +1,6 @@
 # Contracts — Agentic Exchange
 
-Five Solidity contracts on Somnia testnet (chain 50312). `AgentToken.sol` is a mintable ERC20 (AGT) used for real on-chain settlement — SELL orders lock tokens in Exchange escrow, matched fills release them to the buyer, cancels refund the seller. `Exchange.sol` is a real on-chain limit order book with automatic matching and AGT settlement. `AgentCoordinator.sol` routes agents through Somnia's native LLM inference agent for on-chain validator consensus — with peer signal injection, adaptive order sizing via win streaks, coalition orders when 3 agents agree, cancel-before-place, Market Maker dual-sided quoting, and **trustless user agent registration** all built in. A 5th system agent (noise_trader) places orders directly from Python without the coordinator.
+Six Solidity contracts on Somnia testnet (chain 50312). `AgentToken.sol` is a mintable ERC20 (`sETH`, Somnia ETH) — the base asset being traded. `QuoteToken.sol` is a USDC-equivalent ERC20 with a public testnet faucet — the payment currency for BUY orders. `Exchange.sol` is a real on-chain limit order book with two-token settlement: BUY orders lock USDC, SELL orders lock sETH; fills pay both parties atomically. `AgentCoordinator.sol` routes agents through Somnia's native LLM inference agent for on-chain validator consensus — with peer signal injection, adaptive order sizing via win streaks, coalition orders when 3 agents agree, cancel-before-place, Market Maker dual-sided quoting, and **trustless user agent registration** all built in. A 5th system agent (noise_trader) places orders directly from Python without the coordinator.
 
 ---
 
@@ -12,8 +12,10 @@ contracts/
 ├── package.json             # type: "module" (ESM), hardhat + ethers v6 deps
 ├── .env                     # Private keys — NOT committed (see .gitignore)
 ├── contracts/
-│   ├── AgentToken.sol       # Mintable ERC20 (AGT): owner-mint, no OZ dependency
-│   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted + AGT settlement
+│   ├── AgentToken.sol       # Mintable ERC20 (sETH / Somnia ETH): owner-mint, no OZ dependency
+│   ├── QuoteToken.sol       # USDC-equivalent ERC20 with public faucet(); payment currency for BUY orders
+│   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
+│   │                        # BUY locks USDC, SELL locks sETH; fills pay both sides atomically
 │   ├── AgentCoordinator.sol # IAgentRequester integration — Somnia LLM for all 4 agents + approveToken()
 │   ├── AgentRegistry.sol    # Unified registry: registerAgent(), pauseAgent/resumeAgent, config view getters
 │   ├── Treasury.sol         # Per-agent ETH balances (deposit / withdraw / allocate)
@@ -110,8 +112,10 @@ API config set on-chain for market_maker
 System prompt set on-chain for market_maker
 ...
 AgentCoordinator funded with 0.2 STT
-Minted 10M AGT to AgentCoordinator
-AgentCoordinator approved Exchange for AGT
+Minted 10M sETH to AgentCoordinator
+AgentCoordinator approved Exchange for sETH
+Minted 10M USDC to AgentCoordinator
+AgentCoordinator approved Exchange for USDC
 
 ─── Add to backend/.env ───────────────────────────
 AGENT_TOKEN_ADDRESS=0x0000...
@@ -128,7 +132,7 @@ AGENT_COORDINATOR_ADDRESS=0x4444...
 npx hardhat run scripts/seed.js --network somnia
 ```
 
-For each of the 5 agent wallets: registers in `AgentRegistry`, deposits 0.1 STT into `Treasury`, sends 0.05 STT gas from deployer if the wallet has < 0.01 STT, mints 1M AGT, and approves Exchange with a max allowance. The coordinator's AGT pool (10M) was already set up by `deploy.js`. The noise_trader wallet is registered and gets its own AGT allocation because it calls Exchange directly — not via the coordinator.
+For each of the 5 agent wallets: registers in `AgentRegistry`, deposits 0.1 STT into `Treasury`, sends 0.05 STT gas from deployer if the wallet has < 0.01 STT, mints 1M sETH, and approves Exchange. The coordinator's sETH pool (10M) and USDC pool (10M) were already set up by `deploy.js`. The noise_trader wallet gets its own sETH/USDC allocation because it calls Exchange directly — not via the coordinator.
 
 ### 7. Verify deployment
 
@@ -148,12 +152,16 @@ Copy the printed env vars into `backend/.env`, then restart the backend with `./
 
 ### `AgentToken.sol`
 
-Minimal owner-mintable ERC20 token (symbol `AGT`, name `AgentToken`). No OpenZeppelin dependency — fully self-contained. Used by `Exchange.sol` for real on-chain trade settlement.
+Minimal owner-mintable ERC20 token (symbol `sETH`, name `Somnia ETH`). No OpenZeppelin dependency — fully self-contained. Represents synthetic ETH on Somnia — the base asset being traded.
+
+### `QuoteToken.sol`
+
+Minimal ERC20 token (symbol `USDC`, name `USD Coin`). Payment currency in the sETH/USDC market. Features a permissionless `faucet()` function (mints 10,000 USDC to caller) for testnet use. Owner-only `mint()` is called by the backend orchestrator for auto-replenishment.
 
 **Functions:**
 | Function | Access | Description |
 |----------|--------|-------------|
-| `mint(address to, uint256 amount)` | owner only | Mints AGT to any address; unlimited supply |
+| `mint(address to, uint256 amount)` | owner only | Mints sETH to any address; unlimited supply |
 | `transfer(address to, uint256 amount)` | anyone | Standard ERC20 transfer |
 | `approve(address spender, uint256 amount)` | anyone | Standard ERC20 approve |
 | `transferFrom(address from, address to, uint256 amount)` | anyone | Standard ERC20 transferFrom; skips allowance decrement for `type(uint256).max` |
@@ -169,22 +177,25 @@ event Approval(address indexed owner, address indexed spender, uint256 value);
 
 **Token allocation at deploy time:**
 
-- `deploy.js` mints **10 million AGT** to the `AgentCoordinator` (shared pool for the 4 on-chain agents) and calls `coordinator.approveToken()` to grant Exchange a max allowance
-- `seed.js` mints **1 million AGT** to each of the 5 individual agent wallets and approves Exchange (needed for noise_trader which calls Exchange directly)
+- `deploy.js` mints **10 million sETH** and **10 million USDC** to the `AgentCoordinator` and grants Exchange max allowances via `coordinator.approveToken()` for both tokens
+- `seed.js` mints **1 million sETH** to each of the 5 individual agent wallets and approves Exchange (needed for noise_trader which calls Exchange directly)
+- `deploy-local.js` also mints **10 million USDC** to the noise_trader wallet for direct BUY orders
 
 ---
 
 ### `Exchange.sol`
 
-Real on-chain limit order book with automatic matching and AGT token settlement. Every `placeOrder()` call triggers `_matchOrder()` immediately — orders cross if a matching price exists. Tokens are locked on SELL placement, released to the buyer on fill, and refunded to the seller on cancel.
+Real on-chain limit order book with two-token settlement (sETH/USDC). Every `placeOrder()` call triggers `_matchOrder()` immediately. `lastTradePrice` is updated on every fill and is used by `AgentCoordinator` as the order reference price for subsequent cycles — enabling real on-chain price discovery.
 
 **Token flow:**
 
-- `placeOrder(false, ...)` (SELL) → `token.transferFrom(msg.sender, address(this), amount)` — locks AGT in Exchange escrow
-- `_recordTrade()` → `token.transfer(buyer, fill)` — releases AGT to buyer for each matched fill
-- `cancelOrder()` on a SELL → `token.transfer(order.agent, remaining)` — refunds unfilled AGT to seller
+- `placeOrder(true,  ...)` (BUY)  → `quoteToken.transferFrom(msg.sender, address(this), price*amount/1e18)` — locks USDC
+- `placeOrder(false, ...)` (SELL) → `token.transferFrom(msg.sender, address(this), amount)` — locks sETH
+- `_recordTrade()` → `token.transfer(buyer, fill)` + `quoteToken.transfer(seller, quote)` — atomic two-sided settlement; partial fills prorate the USDC; final fill drains the remainder to avoid dust
+- `cancelOrder()` on a BUY  → `quoteToken.transfer(order.agent, lockedQuote)` — refunds unfilled USDC
+- `cancelOrder()` on a SELL → `token.transfer(order.agent, remaining)` — refunds unfilled sETH
 
-Constructor: `constructor(address _token)` — Exchange is deployed with the AgentToken address.
+Constructor: `constructor(address _token, address _quoteToken)` — Exchange is wired to both sETH and USDC at deployment.
 
 **Structs:**
 
@@ -215,8 +226,8 @@ struct Trade {
 **Functions:**
 | Function | Access | Description |
 |----------|--------|-------------|
-| `placeOrder(bool isBuy, uint256 price, uint256 amount)` | anyone | Creates order, locks AGT for SELL orders via `transferFrom`, runs `_matchOrder()`, returns `orderId`. Resting unmatched amount stays in book. |
-| `cancelOrder(uint256 orderId)` | order creator | Refunds unfilled AGT to seller (SELL orders only), marks order inactive, removes from active book |
+| `placeOrder(bool isBuy, uint256 price, uint256 amount)` | anyone | Creates order, locks USDC for BUY orders or sETH for SELL orders via `transferFrom`, runs `_matchOrder()`, returns `orderId`. Resting unmatched amount stays in book. |
+| `cancelOrder(uint256 orderId)` | order creator | Refunds unfilled USDC to buyer (BUY orders) or unfilled sETH to seller (SELL orders), marks order inactive, removes from active book |
 | `getBestBid()` | view | Returns `(price, exists)` — highest active buy order price |
 | `getBestAsk()` | view | Returns `(price, exists)` — lowest active sell order price |
 | `getLastTradePrice()` | view | Price of the most recently matched fill (`0` if no fills yet) |
@@ -286,7 +297,7 @@ Pure execution engine for the on-chain LLM decision loop. All agent configuratio
 | `pauseAgent(string agentId)` | owner or registry | Sets `agentPaused[agentId] = true`; registry calls this after verifying ownership |
 | `resumeAgent(string agentId)` | owner or registry | Clears pause flag; registry calls this after verifying ownership |
 | `fund()` | anyone (payable) | Adds STT to coordinator balance for inference deposits |
-| `approveToken(address, address, uint256)` | owner | Grants Exchange max AGT allowance from coordinator's pool |
+| `approveToken(address, address, uint256)` | owner | Grants Exchange max allowance for a given token (sETH or USDC) from coordinator's pool |
 | `withdraw()` | owner | Withdraws all coordinator STT balance |
 
 **Events:**
@@ -438,12 +449,14 @@ Runs one full decision cycle per agent manually (no daemon needed), verifying `D
 ### `scripts/deploy.js`
 
 1. Gets deployer signer from hardhat
-2. Deploys `AgentToken` (symbol `AGT`)
-3. Deploys `Exchange(tokenAddr)` — Exchange is wired to AGT at construction
+2. Deploys `AgentToken` (symbol `sETH`)
+3. Deploys `QuoteToken` (symbol `USDC`) — testnet payment currency with public faucet
+4. Deploys `Exchange(tokenAddr, quoteTokenAddr)` — Exchange is wired to both sETH and USDC at construction
 4. Deploys `AgentRegistry`, `Treasury`, `AgentCoordinator` sequentially
 5. Calls `AgentCoordinator.setAgentConfig()` and `setSystemPrompt()` for all 5 agents — prompts and price-fetch config stored on-chain
 6. Funds `AgentCoordinator` with 0.2 STT for LLM inference deposits
-7. Mints 10 million AGT to the coordinator (shared pool for 4 on-chain agents)
+7. Mints 10 million sETH to the coordinator (shared pool for 4 on-chain agents)
+8. Mints 10 million USDC to the coordinator and approves Exchange for USDC
 8. Calls `coordinator.approveToken(tokenAddr, exchangeAddr, MaxUint256)` — grants Exchange a max spending allowance over the pool
 9. Reads compiled ABIs from `artifacts/`
 10. Writes `deployments/somnia-testnet.json` with addresses + ABIs
@@ -458,6 +471,7 @@ Runs one full decision cycle per agent manually (no daemon needed), verifying `D
   "deployer": "0x...",
   "contracts": {
     "AgentToken":        { "address": "0x..." },
+    "QuoteToken":        { "address": "0x..." },
     "Exchange":          { "address": "0x..." },
     "AgentRegistry":     { "address": "0x..." },
     "Treasury":          { "address": "0x..." },
@@ -465,6 +479,7 @@ Runs one full decision cycle per agent manually (no daemon needed), verifying `D
   },
   "abis": {
     "AgentToken": [...],
+    "QuoteToken": [...],
     "Exchange": [...],
     "AgentRegistry": [...],
     "Treasury": [...],
@@ -490,7 +505,7 @@ For each agent:
 1. Reads PK from env, skips gracefully if placeholder
 2. Calls `Treasury.depositFor(address)` with 0.1 STT
 3. Checks native gas balance — sends 0.05 STT from deployer if wallet holds < 0.01 STT
-4. Mints 1 million AGT to the agent wallet (for noise_trader direct Exchange calls)
+4. Mints 1 million sETH to the agent wallet (for noise_trader direct Exchange calls)
 5. Calls `token.approve(Exchange, MaxUint256)` from the agent wallet
 
 Note: system agents are registered via `AgentRegistry.registerAgent()` inside `deploy.js`, not `seed.js`.
@@ -554,7 +569,8 @@ The backend (`blockchain/client.py`) also hardcodes the same value.
 | `deploy.js` fails with "invalid private key"    | Placeholder PK in `.env`                        | Fill real `DEPLOYER_PRIVATE_KEY`                                                                     |
 | `seed.js` throws "Cannot read deployments"      | `deploy.js` hasn't been run                     | Run `deploy.js` first                                                                                |
 | `seed.js` skips all agents                      | Agent PKs are still placeholder `0x_...`        | Fill all 5 agent PKs in `.env`                                                                       |
-| SELL order reverts with "Token transfer failed" | Agent wallet has no AGT or no Exchange approval | Run `seed.js` again; for coordinator SELL orders call `approveToken()` with a funded deployer wallet |
+| SELL order reverts with "Token transfer failed" | Agent wallet has no sETH or no Exchange approval | Run `seed.js` again; for coordinator SELL orders call `approveToken()` with a funded deployer wallet |
+| BUY order reverts with "QUOTE transfer failed" | Coordinator or noise_trader has no USDC or no Exchange USDC approval | Wait for orchestrator auto-replenishment (triggers when balance < 1,000 USDC); or call `coordinator.approveToken(quoteAddr, exchangeAddr, max)` manually |
 | `seed.js` skips gas funding for a wallet        | Balance already ≥ 0.01 STT                      | Normal — script is idempotent; no action needed                                                      |
 | `verify.js` shows 0 agents                      | `seed.js` was skipped or failed                 | Run `seed.js`                                                                                        |
 | Backend logs "contract not found"               | `backend/.env` still has placeholder addresses  | Copy the addresses printed by `deploy.js`                                                            |

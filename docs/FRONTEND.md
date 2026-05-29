@@ -227,7 +227,7 @@ Returns `{ agents, loading, error, fetchAgents, createAgent, pauseAgent, resumeA
 - Props: `agent: AgentState`
 - Per-agent color coding: market_maker=blue, momentum_trader=emerald, arbitrage_agent=violet, risk_manager=yellow, noise_trader=pink
 - Strategy description line rendered below agent name
-- Stats: decisions total, BUY/SELL/HOLD counts, AGT balance, net position (LONG/SHORT/FLAT badge)
+- Stats: decisions total, BUY/SELL/HOLD counts, sETH inventory + USDC cash balances, net position (LONG/SHORT/FLAT badge)
 - 🔥 streak badge (pulsing amber border) when `win_streak > 0`; tooltip shows current order size multiplier
 - Contains `ReasoningPanel` and `AgentStatusBadge`
 

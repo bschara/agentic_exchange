@@ -93,26 +93,33 @@ async function main() {
 
   // 2. AgentToken
   const AgentToken = await hre.ethers.getContractFactory('AgentToken');
-  const token = await AgentToken.deploy('AgentToken', 'AGT');
+  const token = await AgentToken.deploy('Somnia ETH', 'sETH');
   await token.waitForDeployment();
   const tokenAddr = await token.getAddress();
   console.log('AgentToken:        ', tokenAddr);
 
-  // 3. Exchange
+  // 3. QuoteToken (USDC-equivalent for testnet)
+  const QuoteToken = await hre.ethers.getContractFactory('QuoteToken');
+  const quoteToken = await QuoteToken.deploy();
+  await quoteToken.waitForDeployment();
+  const quoteTokenAddr = await quoteToken.getAddress();
+  console.log('QuoteToken:        ', quoteTokenAddr);
+
+  // 4. Exchange (sETH/USDC market)
   const Exchange = await hre.ethers.getContractFactory('Exchange');
-  const exchange = await Exchange.deploy(tokenAddr);
+  const exchange = await Exchange.deploy(tokenAddr, quoteTokenAddr);
   await exchange.waitForDeployment();
   const exchangeAddr = await exchange.getAddress();
   console.log('Exchange:          ', exchangeAddr);
 
-  // 4. Treasury
+  // 5. Treasury
   const Treasury = await hre.ethers.getContractFactory('Treasury');
   const treasury = await Treasury.deploy();
   await treasury.waitForDeployment();
   const treasuryAddr = await treasury.getAddress();
   console.log('Treasury:          ', treasuryAddr);
 
-  // 5. AgentCoordinator — deployed BEFORE registry (registry needs coordinator address)
+  // 6. AgentCoordinator — deployed BEFORE registry (registry needs coordinator address)
   const AgentCoordinator = await hre.ethers.getContractFactory('AgentCoordinator');
   const coordinator = await AgentCoordinator.deploy(
     mockPlatformAddr,
@@ -124,24 +131,28 @@ async function main() {
   const coordinatorAddr = await coordinator.getAddress();
   console.log('AgentCoordinator:  ', coordinatorAddr);
 
-  // 6. AgentRegistry — takes coordinator address in constructor
+  // 7. AgentRegistry — takes coordinator address in constructor
   const AgentRegistry = await hre.ethers.getContractFactory('AgentRegistry');
   const registry = await AgentRegistry.deploy(coordinatorAddr);
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
   console.log('AgentRegistry:     ', registryAddr);
 
-  // 7. Wire registry into coordinator so registry can call onlyOwnerOrRegistry functions
+  // 8. Wire registry into coordinator so registry can call onlyOwnerOrRegistry functions
   await (await coordinator.setRegistry(registryAddr)).wait();
   console.log('coordinator.setRegistry() done');
 
-  // 8. Mint AGT to coordinator + approve Exchange
+  // 9. Mint sETH + USDC to coordinator, approve Exchange for both
   await (await token.mint(coordinatorAddr, hre.ethers.parseEther('10000000'))).wait();
-  console.log('Minted 10M AGT to AgentCoordinator');
+  console.log('Minted 10M sETH to AgentCoordinator');
   await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
-  console.log('AgentCoordinator approved Exchange for AGT');
+  console.log('AgentCoordinator approved Exchange for sETH');
+  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('10000000'))).wait();
+  console.log('Minted 10M QUOTE to AgentCoordinator');
+  await (await coordinator.approveToken(quoteTokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log('AgentCoordinator approved Exchange for QUOTE');
 
-  // 9. Register ALL system agents via AgentRegistry.registerAgent()
+  // 10. Register ALL system agents via AgentRegistry.registerAgent()
   //    Deployer is msg.sender → agentOwner = deployer for all system agents.
   //    This replaces the old separate setAgentConfig() + setSystemPrompt() calls.
   console.log('\n─── Registering system agents via unified AgentRegistry ───');
@@ -161,11 +172,11 @@ async function main() {
     console.log(`  ${id}: registered (owner=deployer, icon=${meta.icon}, risk=${meta.riskLevel})`);
   }
 
-  // 10. Fund coordinator with ETH for Somnia platform deposits
+  // 11. Fund coordinator with ETH for Somnia platform deposits
   await (await coordinator.fund({ value: hre.ethers.parseEther('10.0') })).wait();
   console.log('\nCoordinator funded: 10.0 ETH');
 
-  // 11. Fund agent treasuries + mint AGT to noise_trader for direct Exchange calls
+  // 12. Fund agent treasuries + mint sETH + USDC to noise_trader
   console.log('\n─── Funding agent treasuries ───────────────────────────────');
   for (let i = 0; i < AGENT_IDS.length; i++) {
     const signer = agentSigners[i];
@@ -176,11 +187,14 @@ async function main() {
   const noiseSigner = agentSigners[4];
   await (await token.mint(noiseSigner.address, hre.ethers.parseEther('10000'))).wait();
   await (await token.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
-  console.log(`\nNoise trader: 10,000 AGT + Exchange approved (${noiseSigner.address})`);
+  await (await quoteToken.mint(noiseSigner.address, hre.ethers.parseEther('10000000'))).wait();
+  await (await quoteToken.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
+  console.log(`\nNoise trader: 10,000 sETH + 10M QUOTE + Exchange approved (${noiseSigner.address})`);
 
-  // 12. Write deployment JSON
+  // 13. Write deployment JSON
   const mockArtifact  = await hre.artifacts.readArtifact('MockPlatform');
   const tokenArtifact = await hre.artifacts.readArtifact('AgentToken');
+  const quoteArtifact = await hre.artifacts.readArtifact('QuoteToken');
   const exchArtifact  = await hre.artifacts.readArtifact('Exchange');
   const regArtifact   = await hre.artifacts.readArtifact('AgentRegistry');
   const trsArtifact   = await hre.artifacts.readArtifact('Treasury');
@@ -194,6 +208,7 @@ async function main() {
     contracts: {
       MockPlatform:     { address: mockPlatformAddr },
       AgentToken:       { address: tokenAddr },
+      QuoteToken:       { address: quoteTokenAddr },
       Exchange:         { address: exchangeAddr },
       Treasury:         { address: treasuryAddr },
       AgentCoordinator: { address: coordinatorAddr },
@@ -202,6 +217,7 @@ async function main() {
     abis: {
       MockPlatform:     mockArtifact.abi,
       AgentToken:       tokenArtifact.abi,
+      QuoteToken:       quoteArtifact.abi,
       Exchange:         exchArtifact.abi,
       Treasury:         trsArtifact.abi,
       AgentCoordinator: coordArtifact.abi,
@@ -226,6 +242,7 @@ async function main() {
   console.log('SOMNIA_RPC_URL=http://127.0.0.1:8545');
   console.log('SOMNIA_CHAIN_ID=31337');
   console.log(`AGENT_TOKEN_ADDRESS=${tokenAddr}`);
+  console.log(`QUOTE_TOKEN_ADDRESS=${quoteTokenAddr}`);
   console.log(`EXCHANGE_ADDRESS=${exchangeAddr}`);
   console.log(`AGENT_REGISTRY_ADDRESS=${registryAddr}`);
   console.log(`TREASURY_ADDRESS=${treasuryAddr}`);
