@@ -1,7 +1,7 @@
 {
   "chainId": 31337,
   "network": "localhost",
-  "deployedAt": "2026-05-29T08:45:24.804Z",
+  "deployedAt": "2026-05-30T15:35:22.001Z",
   "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
   "contracts": {
     "MockPlatform": {
@@ -508,6 +508,19 @@
         "type": "function"
       },
       {
+        "inputs": [],
+        "name": "FAUCET_COOLDOWN",
+        "outputs": [
+          {
+            "internalType": "uint256",
+            "name": "",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
         "inputs": [
           {
             "internalType": "address",
@@ -879,6 +892,37 @@
         "type": "function"
       },
       {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "tokenAddr",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "amount",
+            "type": "uint256"
+          }
+        ],
+        "name": "emergencyWithdrawToken",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "exchangeOwner",
+        "outputs": [
+          {
+            "internalType": "address",
+            "name": "",
+            "type": "uint256[]"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
         "inputs": [],
         "name": "getActiveBuys",
         "outputs": [
@@ -1030,9 +1074,51 @@
       {
         "inputs": [
           {
-            "internalType": "address",
-            "name": "agent",
-            "type": "address"
+            "components": [
+              {
+                "internalType": "uint256",
+                "name": "id",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "buyOrderId",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "sellOrderId",
+                "type": "uint256"
+              },
+              {
+                "internalType": "address",
+                "name": "buyer",
+                "type": "address"
+              },
+              {
+                "internalType": "address",
+                "name": "seller",
+                "type": "address"
+              },
+              {
+                "internalType": "uint256",
+                "name": "price",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "timestamp",
+                "type": "uint256"
+              }
+            ],
+            "internalType": "struct Exchange.Trade",
+            "name": "",
+            "type": "tuple"
           }
         ],
         "name": "getOrdersByAgent",
@@ -1112,9 +1198,22 @@
         "name": "hasTraded",
         "outputs": [
           {
-            "internalType": "bool",
+            "internalType": "uint256",
+            "name": "orderId",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "quoteToken",
+        "outputs": [
+          {
+            "internalType": "contract IERC20",
             "name": "",
-            "type": "bool"
+            "type": "address"
           }
         ],
         "stateMutability": "view",

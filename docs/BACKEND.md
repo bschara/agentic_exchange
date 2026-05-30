@@ -15,9 +15,17 @@ backend/
 ├── .env.example             # ← committed template: copy to .env and fill in values
 ├── .env                     # Secret keys — NOT committed (.gitignore)
 ├── agents/
-│   ├── orchestrator.py      # AGENT_CONFIGS (5 system), poll loops, metrics loop, _noise_trader_loop(),
-│   │                        # _load_local_deployment(), polls AgentOwnerSet events,
-│   │                        # _on_user_agent_registered(), _reload_user_agents_from_db(), watchdog for user agents
+│   ├── orchestrator.py      # AGENT_CONFIGS (5 system), startup triggers, task wiring,
+│   │                        # _noise_trader_loop(), _snapshot_broadcast_loop(),
+│   │                        # _load_local_deployment(), _on_user_agent_registered(),
+│   │                        # _reload_user_agents_from_db()
+│   ├── metrics_collector.py # Trade poll (1s) + chain metrics collector (5s): coordinator events,
+│   │                        # exchange metrics, treasury balances, P&L tracking, risk warnings
+│   │                        # empty_agent_metrics() factory function (shared with orchestrator)
+│   ├── token_replenisher.py # QUOTE/AGT balance polling + auto-mint every 30s
+│   ├── watchdog.py          # AgentWatchdog: stall detection + re-trigger with fresh nonce
+│   │                        # Bug fixes: stall timer initialised in finally block; refresh_nonce()
+│   │                        # called before every retrigger to avoid "Nonce too low" errors
 │   └── user_agents_db.py    # JSON cache: backend/data/user_agents.json (no private keys)
 ├── market/
 │   ├── price_engine.py      # GBM price simulation + OHLCVBuilder (5s bars)
@@ -25,9 +33,12 @@ backend/
 │   ├── order_book.py        # In-memory bid/ask depth (BookEntry, OrderBook)
 │   └── state_bus.py         # Async-safe shared state: price, order book, warnings, events
 ├── blockchain/
-│   ├── client.py            # Web3 singleton, per-wallet nonce Lock, send_transaction()
-│   └── contracts.py         # Typed wrappers: ExchangeContract, TreasuryContract,
-│                            # AgentCoordinatorContract, AgentRegistryContract, AgentTokenContract, QuoteTokenContract
+│   ├── client.py            # Web3 singleton, per-wallet nonce Lock, send_transaction(),
+│   │                        # refresh_nonce() — evicts cached nonce to force chain re-fetch
+│   ├── abis.py              # Fallback ABI definitions in readable multiline format
+│   └── contracts.py         # _BaseContract (_call/_tx helpers) + typed wrappers:
+│                            # ExchangeContract, TreasuryContract, AgentCoordinatorContract,
+│                            # AgentRegistryContract, AgentTokenContract, QuoteTokenContract
 └── api/
     ├── websocket_hub.py     # ConnectionManager: broadcast() to all WS clients
     ├── routes_ws.py         # /ws WebSocket endpoint + message dispatch
@@ -69,29 +80,30 @@ curl http://localhost:8000/health
 
 All settings live in `config.py` (Pydantic Settings) and are loaded from `backend/.env`.
 
-| Variable                    | Default                            | Required       | Purpose                                                                                                                                |
-| --------------------------- | ---------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `SOMNIA_RPC_URL`            | `https://dream-rpc.somnia.network` | No             | Somnia RPC endpoint (`http://127.0.0.1:8545` for local Hardhat)                                                                        |
-| `SOMNIA_CHAIN_ID`           | `50312`                            | No             | Somnia chain ID (`31337` for local Hardhat)                                                                                            |
-| `EXCHANGE_ADDRESS`          | zero address                       | **Yes**†       | Deployed Exchange.sol address                                                                                                          |
-| `AGENT_REGISTRY_ADDRESS`    | zero address                       | **Yes**†       | Deployed AgentRegistry.sol address                                                                                                     |
-| `TREASURY_ADDRESS`          | zero address                       | **Yes**†       | Deployed Treasury.sol address                                                                                                          |
-| `AGENT_COORDINATOR_ADDRESS` | zero address                       | **Yes**†       | Deployed AgentCoordinator.sol address                                                                                                  |
-| `AGENT_TOKEN_ADDRESS`       | zero address                       | **Yes**†       | Deployed AgentToken (sETH) address                                                                                                     |
-| `QUOTE_TOKEN_ADDRESS`       | zero address                       | **Yes**†       | Deployed QuoteToken (USDC) address                                                                                                     |
-| `DEPLOYER_PRIVATE_KEY`      | *(empty)*                          | **Yes**‡       | Deployer wallet — signs `triggerAgentDecision()`, mints USDC top-ups                                                                   |
-| `MARKET_MAKER_PK`           | *(empty)*                          | **Yes**‡       | Market Maker agent wallet private key                                                                                                  |
-| `MOMENTUM_TRADER_PK`        | *(empty)*                          | **Yes**‡       | Momentum Trader wallet private key                                                                                                     |
-| `ARBITRAGE_AGENT_PK`        | *(empty)*                          | **Yes**‡       | Arb Scanner wallet private key                                                                                                         |
-| `RISK_MANAGER_PK`           | *(empty)*                          | **Yes**‡       | Risk Shield wallet private key                                                                                                         |
-| `NOISE_TRADER_PK`           | *(empty)*                          | **Yes**‡       | Noise Bot wallet — direct Exchange orders                                                                                              |
-| `INITIAL_PRICE`             | `3500.0`                           | No             | Starting price for GBM chart (until real trades come in)                                                                               |
-| `SOMNIA_BLOCK_MS`           | `0`                                | No             | Somnia block time in ms for latency display. Set to `400` for testnet, `0` for Hardhat.                                                |
-| `FRONTEND_URL`              | `http://localhost:3000`            | No             | Allowed CORS origin                                                                                                                    |
+| Variable                    | Default                            | Required | Purpose                                                                                 |
+| --------------------------- | ---------------------------------- | -------- | --------------------------------------------------------------------------------------- |
+| `SOMNIA_RPC_URL`            | `https://dream-rpc.somnia.network` | No       | Somnia RPC endpoint (`http://127.0.0.1:8545` for local Hardhat)                         |
+| `SOMNIA_CHAIN_ID`           | `50312`                            | No       | Somnia chain ID (`31337` for local Hardhat)                                             |
+| `EXCHANGE_ADDRESS`          | zero address                       | **Yes**† | Deployed Exchange.sol address                                                           |
+| `AGENT_REGISTRY_ADDRESS`    | zero address                       | **Yes**† | Deployed AgentRegistry.sol address                                                      |
+| `TREASURY_ADDRESS`          | zero address                       | **Yes**† | Deployed Treasury.sol address                                                           |
+| `AGENT_COORDINATOR_ADDRESS` | zero address                       | **Yes**† | Deployed AgentCoordinator.sol address                                                   |
+| `AGENT_TOKEN_ADDRESS`       | zero address                       | **Yes**† | Deployed AgentToken (sETH) address                                                      |
+| `QUOTE_TOKEN_ADDRESS`       | zero address                       | **Yes**† | Deployed QuoteToken (USDC) address                                                      |
+| `DEPLOYER_PRIVATE_KEY`      | _(empty)_                          | **Yes**‡ | Deployer wallet — signs `triggerAgentDecision()`, mints USDC top-ups                    |
+| `MARKET_MAKER_PK`           | _(empty)_                          | **Yes**‡ | Market Maker agent wallet private key                                                   |
+| `MOMENTUM_TRADER_PK`        | _(empty)_                          | **Yes**‡ | Momentum Trader wallet private key                                                      |
+| `ARBITRAGE_AGENT_PK`        | _(empty)_                          | **Yes**‡ | Arb Scanner wallet private key                                                          |
+| `RISK_MANAGER_PK`           | _(empty)_                          | **Yes**‡ | Risk Shield wallet private key                                                          |
+| `NOISE_TRADER_PK`           | _(empty)_                          | **Yes**‡ | Noise Bot wallet — direct Exchange orders                                               |
+| `INITIAL_PRICE`             | `3500.0`                           | No       | Starting price for GBM chart (until real trades come in)                                |
+| `SOMNIA_BLOCK_MS`           | `0`                                | No       | Somnia block time in ms for latency display. Set to `400` for testnet, `0` for Hardhat. |
+| `FRONTEND_URL`              | `http://localhost:3000`            | No       | Allowed CORS origin                                                                     |
 
 † **Address auto-load:** on localhost `_load_local_deployment()` reads `contracts/deployments/somnia-local.json` and injects real addresses. On testnet it reads `somnia-testnet.json`. Zero-address defaults are safe — contracts simply won't activate until real addresses are present.
 
 ‡ **Private key validation:** defaults are empty strings — no usable fallback. `validate_settings()` (called in `lifespan` before anything starts) enforces:
+
 - **localhost** — missing PKs are allowed; `_load_local_deployment()` fills them from `somnia-local.json`
 - **non-localhost** — any missing or malformed PK causes an immediate `sys.exit(1)` with a clear error listing exactly which variables need to be set. Copy `backend/.env.example` to `backend/.env` for the full template.
 
@@ -105,14 +117,15 @@ All settings live in `config.py` (Pydantic Settings) and are loaded from `backen
 
 `AgentOrchestrator.start_all()` always starts these loops:
 
-| Loop                          | Interval | Purpose                                                                                                                                                                           |
-| ----------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_trade_event_poll_loop`      | 1s       | Reads `TradeExecuted` events, updates `PriceEngine` and `MarketStateBus`, broadcasts `candle` WS messages                                                                         |
-| `_snapshot_broadcast_loop`    | 2s       | Reads `MarketStateBus.get_snapshot()`, broadcasts `market_snapshot` WS message                                                                                                    |
-| `_contract_metrics_poll_loop` | 5s       | Reads coordinator events + contract state, broadcasts `chain_metrics` WS message; emits `risk_warning` on spread > 2% or volatility spike > 2%                                    |
-| `_noise_trader_loop`          | 4–6s     | Places a random buy or sell order directly via `ExchangeContract.place_order()` using `NOISE_TRADER_PK`. No LLM, no coordinator. Random price ±0.5%, random amount 0.03–0.08 ETH. |
+| Loop                                                       | Module                                     | Interval | Purpose                                                                                                                                                                           |
+| ---------------------------------------------------------- | ------------------------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MetricsCollector.run_trade_poll`                          | `metrics_collector.py`                     | 1s       | Reads `TradeExecuted` events, updates `PriceEngine` and `MarketStateBus`, broadcasts `candle` WS messages                                                                         |
+| `_snapshot_broadcast_loop`                                 | `orchestrator.py`                          | 3s       | Reads `MarketStateBus.get_snapshot()`, broadcasts `market_snapshot` WS message                                                                                                    |
+| `_contract_metrics_poll_loop` → `MetricsCollector.collect` | `orchestrator.py` / `metrics_collector.py` | 5s       | Reads coordinator events + contract state, broadcasts `chain_metrics`; emits `risk_warning` on spread > 2% or volatility > 2%                                                     |
+| `TokenReplenisher.run`                                     | `token_replenisher.py`                     | 30s      | Polls QUOTE/AGT balances for coordinator + noise_trader; mints via `QuoteToken.mint()` when below 1,000 USDC                                                                      |
+| `_noise_trader_loop`                                       | `orchestrator.py`                          | 4–6s     | Places a random buy or sell order directly via `ExchangeContract.place_order()` using `NOISE_TRADER_PK`. No LLM, no coordinator. Random price ±0.5%, random amount 0.03–0.08 ETH. |
 
-When `_coordinator` is set, it additionally fires one `triggerAgentDecision()` per agent (the 4 on-chain agents) at startup (staggered 1s apart). After that, the on-chain loop is self-sustaining.
+When `_coordinator` is set, it additionally fires one `triggerAgentDecision()` per agent (the 4 on-chain agents) at startup (staggered 1s apart) and starts `AgentWatchdog.run()`. After that, the on-chain loop is self-sustaining.
 
 ### Contract Metrics Poll
 
@@ -224,49 +237,52 @@ All methods protected by `asyncio.Lock` for safe concurrent access from multiple
 - **Per-wallet `asyncio.Lock`**: 5 agents each own a wallet; the lock prevents nonce reuse when agents transact concurrently
 - **30s receipt timeout**: if confirmation doesn't arrive, logs a warning and the agent continues (never blocks)
 
+### `blockchain/abis.py`
+
+Fallback ABI definitions for all six contracts. Loaded automatically by `contracts.py` when no deployment JSON is present. Written in readable multiline format using builder helpers (`_fn`, `_view`, `_ev`, `_i`) rather than opaque one-liner JSON.
+
 ### `blockchain/contracts.py`
 
-ABI loading strategy: tries `contracts/deployments/somnia-testnet.json` first (deployed ABIs), falls back to minimal inline ABIs. This means the backend works before deployment with reduced functionality.
+ABI loading: tries `contracts/deployments/somnia-testnet.json` first, then `somnia-local.json`, then falls back to `abis.py`. All six contract classes inherit `_BaseContract`:
+
+- `_call(fn, *, default, name)` — runs a read-only call in `run_in_executor`, returns `default` on any error
+- `_tx(pk, fn_name, args)` — encodes + sends a state-mutating transaction, returns tx hash
 
 **`AgentCoordinatorContract`** — wraps `AgentCoordinator.sol`:
 
-- `trigger_decision(agent_pk, agent_id)` → ABI-encodes `triggerAgentDecision(agentId)`, submits signed tx from the agent's wallet. Called once per agent at startup by `orchestrator.start_all()`. After this the contract self-loops.
-- `get_balance()` → reads the coordinator's STT balance (must stay funded; each cycle costs 2 deposits)
-- `get_coordinator_events(from_block)` → polls `DecisionExecuted`, `DecisionFailed`, `LoopStopped`, `LLMRequestFired`, `AgentPaused`, `AgentResumed` events in one pass, returns them sorted by block number
-- `get_decision_executed_events(from_block)` → targeted single-event poll for `DecisionExecuted` only; called at the top of each 1s trade loop iteration to populate `_order_to_agent` before trade attribution
-- `pause_agent(deployer_pk, agent_id)` → calls `pauseAgent(agentId)` on-chain
-- `resume_agent(deployer_pk, agent_id)` → calls `resumeAgent(agentId)` on-chain
-- `is_paused(agent_id) -> bool` → view call to `agentPaused[agentId]`
+- `trigger_decision(agent_pk, agent_id)` → called once per agent at startup; contract self-loops after that
+- `trigger_with_price(agent_pk, agent_id, price)` → skips JSON API step; backend supplies price
+- `get_balance()` → coordinator STT balance (must stay funded; each cycle costs 2 deposits)
+- `get_coordinator_events(from_block)` → polls all 8 event types in one pass, sorted by block
+- `get_decision_executed_events(from_block)` → targeted `DecisionExecuted`-only poll for the 1s trade loop
+- `pause_agent(deployer_pk, agent_id)` / `resume_agent(deployer_pk, agent_id)` → on-chain pause/resume
 
 **`AgentTokenContract`** — wraps `AgentToken.sol` (sETH):
 
-- `mint(deployer_pk, to_address, amount_seth)` → mints sETH to any address (owner-only on-chain)
+- `mint(deployer_pk, to_address, amount_tokens)` → mints sETH (owner-only on-chain)
+- `get_balance(agent_address)` → sETH balance
 
 **`QuoteTokenContract`** — wraps `QuoteToken.sol` (USDC):
 
 - `get_balance(address)` → USDC balance
-- `mint(deployer_pk, to_address, amount)` → mints USDC (owner-only); used for auto-replenishment
-- `faucet(caller_pk)` → permissionless self-top-up (10K USDC per call)
-- `get_balance(address) -> float` → `balanceOf(address)` scaled from wei
-- `get_total_supply() -> float` → `totalSupply()` scaled from wei
+- `mint(owner_pk, to_address, amount_tokens)` → mints USDC (owner-only); used by `TokenReplenisher`
 
 **`AgentRegistryContract`** — wraps `AgentRegistry.sol`:
 
-- `set_active(deployer_pk, agent_address, active)` → calls `setActive(agent, active)` on-chain
+- `get_all_agent_ids()`, `get_agent(agent_id)`, `get_agent_registered_events(from_block)`
+- `set_active(deployer_pk, agent_id, active)` → dispatches to `pauseAgent` or `resumeAgent` on-chain
 
 **`ExchangeContract`** methods:
 
+- `place_order(agent_pk, is_buy, price, amount)`, `cancel_order(agent_pk, order_id)`
 - `get_best_bid()` / `get_best_ask()` → on-chain spread from active order book
 - `get_last_trade_price()` → price of most recent matched fill (0 if no fills yet)
-- `has_traded()` → bool — whether any match has ever occurred
-- `get_recent_trade_events(from_block)` → reads `TradeExecuted` event logs for OHLCV construction
-- `get_order_book_depth()` → `{ buy_count, sell_count }` from `getActiveBuys()`/`getActiveSells()`
-- `get_order_placed_events(from_block)` → reads `OrderPlaced` events; includes `agent` address for wallet-to-ID mapping
+- `get_order_book(n)`, `get_order_book_depth()`, `get_recent_trade_events(from_block)`, `get_order_placed_events(from_block)`
 
 **`TreasuryContract`** methods:
 
 - `get_balance(agent_address)` → per-agent STT balance
-- `get_total_locked()` → total STT held by the treasury contract (`totalLocked()`)
+- `get_total_locked()` → total STT held by the treasury contract
 
 ---
 
@@ -276,7 +292,7 @@ ABI loading strategy: tries `contracts/deployments/somnia-testnet.json` first (d
 
 | `type`            | Frequency           | Fields                                                                                                                                      |
 | ----------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `market_snapshot` | every 2s            | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10), `recent_trades` (last 50, each with `buyer_agent`/`seller_agent`) |
+| `market_snapshot` | every 3s            | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10), `recent_trades` (last 50, each with `buyer_agent`/`seller_agent`) |
 | `candle`          | every 5s            | `time`, `open`, `high`, `low`, `close`, `volume`                                                                                            |
 | `chain_metrics`   | every 5s            | Full `chain_metrics` object — see schema above                                                                                              |
 | `risk_warning`    | on threshold breach | `from_agent`, `severity` (`HIGH`/`MEDIUM`), `warning_type` (`HIGH_SPREAD`/`VOLATILITY_SPIKE`), `message`, `timestamp`                       |
@@ -343,18 +359,18 @@ Set `INITIAL_PRICE` and `PRICE_VOLATILITY` in `backend/.env`. Volatility (`σ`) 
 
 ## Key Design Decisions
 
-| Decision                                     | Reason                                                                                                                                                                                                                                                                                                                                                          |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Contract metrics poll, not agent push        | Backend observes the on-chain loop via event polling rather than driving it. Decouples dashboard from the trading cycle and never blocks the contract's self-trigger cadence.                                                                                                                                                                                   |
-| `from_block` advances in metrics loop        | After each poll the loop stores `max_block_seen + 1` so events are counted exactly once across poll cycles.                                                                                                                                                                                                                                                     |
-| `_is_address()` guard on init                | Validates addresses against `r"0x[0-9a-fA-F]{40}"` before instantiating contracts — gracefully handles unconfigured `.env` without raising at startup.                                                                                                                                                                                                          |
+| Decision                                     | Reason                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Contract metrics poll, not agent push        | Backend observes the on-chain loop via event polling rather than driving it. Decouples dashboard from the trading cycle and never blocks the contract's self-trigger cadence.                                                                                                                                                                                                                               |
+| `from_block` advances in metrics loop        | After each poll the loop stores `max_block_seen + 1` so events are counted exactly once across poll cycles.                                                                                                                                                                                                                                                                                                 |
+| `_is_address()` guard on init                | Validates addresses against `r"0x[0-9a-fA-F]{40}"` before instantiating contracts — gracefully handles unconfigured `.env` without raising at startup.                                                                                                                                                                                                                                                      |
 | `validate_settings()` at startup             | Called in `lifespan()` before the orchestrator starts. On non-localhost chains, any missing or malformed private key causes `sys.exit(1)` with a precise error message. On localhost the check is skipped — `_load_local_deployment()` fills keys from `somnia-local.json`. No usable PK defaults exist in `config.py`; the `0x000...000x` placeholder keys were removed to prevent accidental testnet use. |
-| `asyncio.Lock` per wallet                    | Concurrent startup triggers (1s stagger) could cause nonce conflicts; per-wallet lock prevents dropped txs.                                                                                                                                                                                                                                                     |
-| GBM price, not a real feed                   | Demo needs controllable events (whale buy, crash) — a real feed can't be scripted. Replaced by on-chain prices once fills start arriving.                                                                                                                                                                                                                       |
-| Hardcoded 6 gwei gas                         | `eth_gasPrice` RPC returns unreliable values on Somnia testnet; hardcoding avoids tx failures.                                                                                                                                                                                                                                                                  |
-| 30s receipt timeout (not infinite)           | A stuck startup trigger should never block the orchestrator — log and continue.                                                                                                                                                                                                                                                                                 |
-| Agents stagger 1s at startup                 | Spreads the burst of `triggerAgentDecision()` transactions to avoid nonce collisions during the initial on-chain kickoff.                                                                                                                                                                                                                                       |
-| `_order_to_agent` dict for attribution       | `AgentCoordinator` is `msg.sender` for all `Exchange.placeOrder()` calls — individual agent wallets never appear in `OrderPlaced`. `DecisionExecuted` carries both `agentId` and `orderId`, so the backend builds a `{order_id → agent_id}` map from these events and uses it as a fallback in `_trade_event_poll_loop` when the wallet lookup returns nothing. |
-| `get_decision_executed_events` in trade loop | `DecisionExecuted` and `TradeExecuted` can fire in the same block (order auto-matches on placement). The 5s metrics loop might not have processed `DecisionExecuted` yet when the 1s trade loop tries to attribute a trade. Polling `DecisionExecuted` at the top of each 1s iteration keeps `_order_to_agent` current.                                         |
-| sETH balance from coordinator                | On-chain agents hold no sETH in their own wallets — the coordinator holds a shared 10M pool. `_collect_chain_metrics` polls `AgentToken.balanceOf(coordinator_address)` and assigns the coordinator's balance to all 4 on-chain agents. Only `noise_trader` gets its own wallet balance.                                                                         |
-| Wallet signature auth (admin_auth)           | Admin endpoints (pause/resume/fund) require a `personal_sign` MetaMask signature with a timestamped message. The deployer address is derived server-side from `DEPLOYER_PRIVATE_KEY` — never stored in env as a config value — and the signature is verified on every request. 5-minute window prevents replay.                                                 |
+| `asyncio.Lock` per wallet                    | Concurrent startup triggers (1s stagger) could cause nonce conflicts; per-wallet lock prevents dropped txs.                                                                                                                                                                                                                                                                                                 |
+| GBM price, not a real feed                   | Demo needs controllable events (whale buy, crash) — a real feed can't be scripted. Replaced by on-chain prices once fills start arriving.                                                                                                                                                                                                                                                                   |
+| Hardcoded 6 gwei gas                         | `eth_gasPrice` RPC returns unreliable values on Somnia testnet; hardcoding avoids tx failures.                                                                                                                                                                                                                                                                                                              |
+| 30s receipt timeout (not infinite)           | A stuck startup trigger should never block the orchestrator — log and continue.                                                                                                                                                                                                                                                                                                                             |
+| Agents stagger 1s at startup                 | Spreads the burst of `triggerAgentDecision()` transactions to avoid nonce collisions during the initial on-chain kickoff.                                                                                                                                                                                                                                                                                   |
+| `_order_to_agent` dict for attribution       | `AgentCoordinator` is `msg.sender` for all `Exchange.placeOrder()` calls — individual agent wallets never appear in `OrderPlaced`. `DecisionExecuted` carries both `agentId` and `orderId`, so the backend builds a `{order_id → agent_id}` map from these events and uses it as a fallback in `MetricsCollector.run_trade_poll` when the wallet lookup returns nothing.                                    |
+| `get_decision_executed_events` in trade loop | `DecisionExecuted` and `TradeExecuted` can fire in the same block (order auto-matches on placement). The 5s metrics loop might not have processed `DecisionExecuted` yet when the 1s trade loop tries to attribute a trade. Polling `DecisionExecuted` at the top of each 1s iteration keeps `_order_to_agent` current.                                                                                     |
+| sETH balance from coordinator                | On-chain agents hold no sETH in their own wallets — the coordinator holds a shared 10M pool. `MetricsCollector.collect` reads `AgentToken.balanceOf(coordinator_address)` and assigns the coordinator's balance to all 4 on-chain agents. Only `noise_trader` gets its own wallet balance.                                                                                                                  |
+| Wallet signature auth (admin_auth)           | Admin endpoints (pause/resume/fund) require a `personal_sign` MetaMask signature with a timestamped message. The deployer address is derived server-side from `DEPLOYER_PRIVATE_KEY` — never stored in env as a config value — and the signature is verified on every request. 5-minute window prevents replay.                                                                                             |

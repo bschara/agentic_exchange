@@ -1,13 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useMarketStore } from '@/store/marketStore';
 import { useAgentStore } from '@/store/agentStore';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { connectWallet, isOwnerAddress, pauseAll, resumeAll, fundAll } from '@/hooks/useAdminActions';
 import { useUserStore } from '@/store/userStore';
 import { Badge } from '@/components/ui/badge';
-import { Zap, Activity, Wallet, PauseCircle, PlayCircle, Coins } from 'lucide-react';
+import { Zap, Activity, Wallet, PauseCircle, PlayCircle, Coins, LogOut } from 'lucide-react';
 
 const EVENTS = [
   { type: 'whale_buy', label: 'WHALE BUY +3%', className: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/30' },
@@ -22,17 +22,44 @@ export function Header() {
   const { agents, somniaBlockMs } = useAgentStore();
   const { injectEvent } = useWebSocket();
   const [cooldowns, setCooldowns] = useState<Record<string, boolean>>({});
-  const [walletAddress, setWalletAddress] = useState<string | null>(null);
-  const setGlobalWallet = useUserStore((s) => s.setWalletAddress);
   const [adminLoading, setAdminLoading] = useState<string | null>(null);
   const [fundAmount, setFundAmount] = useState<string>('100');
+
+  const walletAddress = useUserStore((s) => s.walletAddress);
+  const setWalletAddress = useUserStore((s) => s.setWalletAddress);
   const isOwner = !!walletAddress && isOwnerAddress(walletAddress);
+
+  // On mount, verify MetaMask still has the persisted account connected.
+  // If the user disconnected from the MetaMask extension while the tab was closed,
+  // eth_accounts returns [] and we clear the stale persisted address.
+  useEffect(() => {
+    if (!walletAddress) return;
+    const eth = (window as any).ethereum;
+    if (!eth) return;
+    eth.request({ method: 'eth_accounts' })
+      .then((accounts: string[]) => {
+        if (!accounts.some((a: string) => a.toLowerCase() === walletAddress.toLowerCase())) {
+          setWalletAddress(null);
+        }
+      })
+      .catch(() => setWalletAddress(null));
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleConnect = async () => {
     const addr = await connectWallet();
     if (addr) {
       setWalletAddress(addr);
       setGlobalWallet(addr);
+    }
+  };
+
+  const handleDisconnect = () => {
+    setWalletAddress(null);
+    // Best-effort revoke so MetaMask forgets the permission
+    try {
+      (window as any).ethereum?.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] });
+    } catch {
+      // Not supported by all wallets — silently ignore
     }
   };
 
@@ -141,14 +168,32 @@ export function Header() {
               CONNECT
             </button>
           ) : !isOwner ? (
-            <span className="text-xs text-gray-600 font-mono">
-              {walletAddress.slice(0, 6)}…{walletAddress.slice(-4)}
-            </span>
-          ) : (
-            <>
-              <span className="text-xs text-violet-400 font-mono mr-1">
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-gray-600 font-mono">
                 {walletAddress.slice(0, 6)}…{walletAddress.slice(-4)}
               </span>
+              <button
+                onClick={handleDisconnect}
+                title="Disconnect wallet"
+                className="p-1 rounded text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
+              >
+                <LogOut className="w-3 h-3" />
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-1 mr-1">
+                <span className="text-xs text-violet-400 font-mono">
+                  {walletAddress.slice(0, 6)}…{walletAddress.slice(-4)}
+                </span>
+                <button
+                  onClick={handleDisconnect}
+                  title="Disconnect wallet"
+                  className="p-1 rounded text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                >
+                  <LogOut className="w-3 h-3" />
+                </button>
+              </div>
               <button
                 onClick={() => handleAdmin('pause-all', () => pauseAll(walletAddress))}
                 disabled={!!adminLoading}
