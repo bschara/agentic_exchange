@@ -406,6 +406,7 @@ class AgentCoordinatorContract(_BaseContract):
             ("CoalitionFormed",   self._contract.events.CoalitionFormed),
             ("AgentPaused",       self._contract.events.AgentPaused),
             ("AgentResumed",      self._contract.events.AgentResumed),
+            ("AgentOwnerSet",     self._contract.events.AgentOwnerSet),
         ]
 
         for name, event_cls in event_types:

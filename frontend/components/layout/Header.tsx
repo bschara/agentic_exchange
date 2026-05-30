@@ -47,7 +47,10 @@ export function Header() {
 
   const handleConnect = async () => {
     const addr = await connectWallet();
-    if (addr) setWalletAddress(addr);
+    if (addr) {
+      setWalletAddress(addr);
+      setGlobalWallet(addr);
+    }
   };
 
   const handleDisconnect = () => {

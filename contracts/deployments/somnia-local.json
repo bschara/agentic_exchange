@@ -916,7 +916,7 @@
           {
             "internalType": "address",
             "name": "",
-            "type": "address"
+            "type": "uint256[]"
           }
         ],
         "stateMutability": "view",
@@ -1074,9 +1074,51 @@
       {
         "inputs": [
           {
-            "internalType": "address",
-            "name": "agent",
-            "type": "address"
+            "components": [
+              {
+                "internalType": "uint256",
+                "name": "id",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "buyOrderId",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "sellOrderId",
+                "type": "uint256"
+              },
+              {
+                "internalType": "address",
+                "name": "buyer",
+                "type": "address"
+              },
+              {
+                "internalType": "address",
+                "name": "seller",
+                "type": "address"
+              },
+              {
+                "internalType": "uint256",
+                "name": "price",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "timestamp",
+                "type": "uint256"
+              }
+            ],
+            "internalType": "struct Exchange.Trade",
+            "name": "",
+            "type": "tuple"
           }
         ],
         "name": "getOrdersByAgent",
@@ -1156,9 +1198,22 @@
         "name": "hasTraded",
         "outputs": [
           {
-            "internalType": "bool",
+            "internalType": "uint256",
+            "name": "orderId",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "quoteToken",
+        "outputs": [
+          {
+            "internalType": "contract IERC20",
             "name": "",
-            "type": "bool"
+            "type": "address"
           }
         ],
         "stateMutability": "view",
