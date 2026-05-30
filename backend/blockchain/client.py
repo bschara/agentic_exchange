@@ -31,6 +31,11 @@ def get_wallet_lock(address: str) -> asyncio.Lock:
     return _wallet_locks[address]
 
 
+def refresh_nonce(address: str) -> None:
+    """Remove cached nonce so the next send_transaction re-fetches from chain."""
+    _nonces.pop(address, None)
+
+
 async def send_transaction(
     private_key: str,
     to: str,
@@ -53,7 +58,7 @@ async def send_transaction(
                 "to": Web3.to_checksum_address(to),
                 "data": data,
                 "value": value,
-                "gas": 500_000,
+                "gas": 2_000_000,
                 "gasPrice": GAS_PRICE,
                 "nonce": _nonces[address],
                 "chainId": settings.somnia_chain_id,
@@ -77,6 +82,10 @@ async def send_transaction(
 
         except asyncio.TimeoutError:
             logger.warning(f"Tx timeout for {address}, continuing agent loop")
+            try:
+                _nonces[address] = w3.eth.get_transaction_count(address, "pending")
+            except Exception:
+                pass
             return ""
         except Exception as e:
             logger.error(f"Tx failed for {address}: {e}")
