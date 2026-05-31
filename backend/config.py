@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     deployer_address: str = ""
 
     # Initial price shown before the first on-chain trade arrives
-    initial_price: float = 3500.0
+    initial_price: float = 2000.0
 
     # Somnia block time in milliseconds — used for latency display.
     # Set to 400 for testnet, 0 for local Hardhat (blocks are instant).

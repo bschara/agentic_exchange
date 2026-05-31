@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
-contract QuoteToken {
-    string public name = "USD Coin";
-    string public symbol = "USDC";
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+
+contract QuoteToken is Initializable, UUPSUpgradeable {
+    string public name;
+    string public symbol;
     uint8  public constant decimals = 18;
 
     address public owner;
@@ -19,8 +22,15 @@ contract QuoteToken {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
-        owner = msg.sender;
+        _disableInitializers();
+    }
+
+    function initialize() external initializer {
+        name   = "USD Coin";
+        symbol = "USDC";
+        owner  = msg.sender;
     }
 
     function mint(address to, uint256 amount) external {
@@ -51,6 +61,10 @@ contract QuoteToken {
         allowance[msg.sender][spender] = amount;
         emit Approval(msg.sender, spender, amount);
         return true;
+    }
+
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == owner, "Not owner");
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {

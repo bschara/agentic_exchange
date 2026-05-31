@@ -18,6 +18,7 @@ from blockchain.contracts import (
 from api.websocket_hub import ConnectionManager
 from agents.metrics_collector import MetricsCollector, empty_agent_metrics
 from agents.token_replenisher import TokenReplenisher
+from market.price_feed import fetch_eth_usd
 from agents.watchdog import AgentWatchdog
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,12 @@ class AgentOrchestrator:
 
     async def start_all(self):
         logger.info("Starting orchestrator...")
+        try:
+            live_price = float(await fetch_eth_usd())
+            self._price_tracker.price = live_price
+            logger.info(f"Price engine seeded from live ETH/USD: ${live_price:.0f}")
+        except Exception as exc:
+            logger.warning(f"Live price fetch failed, keeping default ${self._price_tracker.price:.0f}: {exc}")
 
         self._poll_task     = asyncio.create_task(self._metrics_collector.run_trade_poll())
         self._snapshot_task = asyncio.create_task(self._snapshot_broadcast_loop())
@@ -247,20 +254,25 @@ class AgentOrchestrator:
         logger.info(f"Injecting event: {event_type}")
         await self._state_bus.inject_event(event_type, params)
 
+        _shock = {
+            "whale_buy": 1.03, "whale_sell": 0.97, "flash_crash": 0.92,
+            "news_event": 1.015, "volatility_spike": 1.0,
+        }
         event_descriptions = {
             "whale_buy":        "Whale buy: +3% price impact",
             "whale_sell":       "Whale sell: -3% price impact",
-            "volatility_spike": "Volatility spike: 5x vol for 30s",
+            "volatility_spike": "Volatility spike: ±2% × 5 ticks",
             "flash_crash":      "Flash crash: -8% price shock",
-            "news_event":       "News event: 3x vol + 1.5% upside",
+            "news_event":       "News event: +1.5% upside",
         }
+        price_after = price_before * _shock.get(event_type, 1.0)
         await self._hub.broadcast({
             "type": "event_injected",
             "data": {
                 "event_type":   event_type,
                 "description":  event_descriptions.get(event_type, event_type),
                 "price_before": round(price_before, 4),
-                "price_after":  round(price_before, 4),
+                "price_after":  round(price_after, 4),
                 "timestamp":    time.time(),
             },
         })

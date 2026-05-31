@@ -133,7 +133,12 @@ async function main() {
     _inFlight.add(key);
     queue = queue
       .then(fn)
-      .catch((err) => console.error('Queue error:', err.message))
+      .catch(async (err) => {
+        console.error('Queue error:', err.message);
+        if (err.code === 'NONCE_EXPIRED' || err.message?.includes('nonce')) {
+          await managedWallet.reset();
+        }
+      })
       .finally(() => _inFlight.delete(key));
   };
 
@@ -212,6 +217,9 @@ async function main() {
           await tx.wait();
         } catch (e) {
           console.error(`[Price ] reqId=${reqIdStr} FAILED:`, e.message);
+          if (e.code === 'NONCE_EXPIRED' || e.message?.includes('nonce')) {
+            await managedWallet.reset();
+          }
         }
 
       } else if (callbackSelector === handleDecisionSel) {
@@ -224,6 +232,9 @@ async function main() {
           _requestToAgent.delete(reqIdStr);
         } catch (e) {
           console.error(`[LLM   ] reqId=${reqIdStr} FAILED:`, e.message);
+          if (e.code === 'NONCE_EXPIRED' || e.message?.includes('nonce')) {
+            await managedWallet.reset();
+          }
         }
 
       } else {

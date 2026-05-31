@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
+
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 // ── Somnia Agent Platform interfaces ────────────────────────────────────────────
 
@@ -85,13 +88,15 @@ interface IAgentRegistry {
 // AgentRegistry. Coordinator reads it via view calls and owns only runtime state:
 // winStreak, lastDecision, agentPaused, lastOrderId, pendingRequests, _agentIdList.
 //
-contract AgentCoordinator {
+contract AgentCoordinator is Initializable, UUPSUpgradeable {
     // Base order size; scales with win streak via _orderAmount(), capped at 5×
     uint256 public constant ORDER_AMOUNT_BASE = 0.001e18;
     uint256 public constant ORDER_AMOUNT_MAX  = 0.005e18;
     uint256 public constant PRICE_OFFSET_BPS  = 10; // 0.1%
 
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IAgentRequester public immutable platform;
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     IExchange       public immutable exchange;
     address         public owner;
 
@@ -176,17 +181,25 @@ contract AgentCoordinator {
         _;
     }
 
-    // ── Constructor ───────────────────────────────────────────────────────────
+    // ── Constructor (immutables only) ─────────────────────────────────────────
+    // Only sets immutable platform + exchange; prevents direct initialization
+    // of the implementation contract (must go through the proxy).
 
-    constructor(
-        address _platform,
-        address _exchange,
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor(address _platform, address _exchange) {
+        platform = IAgentRequester(_platform);
+        exchange = IExchange(_exchange);
+        _disableInitializers();
+    }
+
+    // ── Initializer (called once via proxy on first deploy) ───────────────────
+
+    function initialize(
+        address _owner,
         uint256 _llmAgentId,
         uint256 _jsonApiAgentId
-    ) {
-        platform       = IAgentRequester(_platform);
-        exchange       = IExchange(_exchange);
-        owner          = msg.sender;
+    ) external initializer {
+        owner          = _owner;
         llmAgentId     = _llmAgentId;
         jsonApiAgentId = _jsonApiAgentId;
 
@@ -561,6 +574,8 @@ contract AgentCoordinator {
         while (v != 0) { buf[--len] = bytes1(uint8(48 + v % 10)); v /= 10; }
         return string(buf);
     }
+
+    function _authorizeUpgrade(address) internal override onlyOwner {}
 
     function getBalance() external view returns (uint256) {
         return address(this).balance;

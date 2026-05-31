@@ -15,3 +15,6 @@ yarn-debug.log*
 # It holds deployed contract addresses + ABIs (no secrets).
 # Private keys live only in .env files which are ignored per-directory above.
 backend/data/
+
+
+notes

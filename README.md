@@ -81,7 +81,7 @@ User agents participate in the same on-chain LLM pipeline as system agents, read
 
 - **Frontend**: Next.js 14 + Tailwind CSS + TradingView Lightweight Charts v5 + Zustand + ethers.js (for on-chain ABI encoding)
 - **Backend**: Python FastAPI + WebSockets (no off-chain AI — all decisions are on-chain)
-- **Contracts**: Solidity (AgentToken `sETH` ERC20, QuoteToken `USDC` ERC20, Exchange LOB, AgentCoordinator, AgentRegistry, Treasury) on Somnia testnet
+- **Contracts**: Solidity — all six contracts are upgradeable UUPS proxies (OZ `Initializable` + `UUPSUpgradeable`): `AgentToken` (sETH ERC20), `QuoteToken` (USDC ERC20), `Exchange` (LOB), `Treasury`, `AgentCoordinator`, `AgentRegistry` on Somnia testnet
 - **Onchain AI**: Somnia LLM Inference Agent via `IAgentRequester` — BUY/SELL/HOLD consensus from Somnia validators
 - **User Agent Auth**: trustless — `agentOwner` in `AgentRegistry` enforces ownership; `AgentRegistry.pauseAgent/resumeAgent` verify `msg.sender == agentOwner` before calling coordinator
 
@@ -261,10 +261,20 @@ cp .env.example .env
 # Fill DEPLOYER_PRIVATE_KEY in contracts/.env
 
 npx hardhat run scripts/deploy.js --network somnia
-# Deploys Exchange, AgentRegistry, Treasury, AgentCoordinator
-# Sets per-agent system prompts on-chain for all 5 agents
+# Deploys all 6 contracts as UUPS proxies (ERC1967Proxy + UUPSUpgradeable):
+#   AgentToken, QuoteToken, Exchange, Treasury, AgentCoordinator, AgentRegistry
+# Registers all 5 system agents via AgentRegistry.registerAgent()
 # Funds AgentCoordinator with 0.2 STT for LLM request deposits
-# Prints the exact env vars to copy
+# Prints proxy addresses to paste into backend/.env (stable forever)
+```
+
+To upgrade any contract after a code change (without changing its address or losing state):
+
+```bash
+npx hardhat run scripts/upgrade.js --network somnia
+# Upgrades all 6 proxies by default. Skip any with env flags, e.g.:
+# UPGRADE_EXCHANGE=false UPGRADE_TREASURY=false npx hardhat run scripts/upgrade.js --network somnia
+# The coordinator self-loop continues uninterrupted through the upgrade
 ```
 
 ### Step 4 — Register agents and fund treasuries
@@ -344,13 +354,19 @@ Click the event injection buttons to watch agents react in real-time:
 somnia_hackathon/
 ├── contracts/              # Hardhat + Solidity
 │   ├── contracts/
-│   │   ├── AgentToken.sol       # mintable ERC20 (sETH / Somnia ETH): owner-mint, unlimited supply, no OZ dependency
-│   │   ├── QuoteToken.sol       # USDC-equivalent ERC20 for BUY-order payment; public faucet() for testnet top-up
-│   │   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
-│   │   │                        # BUY orders lock USDC (quoteToken) via transferFrom; SELL orders lock sETH
-│   │   │                        # fills: sETH → buyer, USDC → seller; cancels: refund locked token to placer
-│   │   │                        # price discovery: lastTradePrice updated on every fill — used by coordinator
-│   │   ├── AgentCoordinator.sol # Pure execution engine — reads config from AgentRegistry
+│   │   ├── AgentToken.sol       # ★ Upgradeable (OZ Initializable + UUPSUpgradeable)
+│   │   │                        # Mintable ERC20 (sETH / Somnia ETH): owner-mint, unlimited supply
+│   │   │                        # initialize(name, symbol) — owner set to deployer via proxy
+│   │   ├── QuoteToken.sol       # ★ Upgradeable (OZ Initializable + UUPSUpgradeable)
+│   │   │                        # USDC-equivalent ERC20 for BUY-order payment; public faucet() for testnet top-up
+│   │   │                        # initialize() — sets name/symbol/owner; constants (FAUCET_AMOUNT) stay in bytecode
+│   │   ├── Exchange.sol         # ★ Upgradeable (OZ Initializable + UUPSUpgradeable)
+│   │   │                        # Real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
+│   │   │                        # BUY orders lock USDC via transferFrom; SELL orders lock sETH
+│   │   │                        # fills: sETH → buyer, USDC → seller; cancels refund locked token
+│   │   │                        # initialize(token, quoteToken) — also sets _nextOrderId/TradeId to 1
+│   │   ├── AgentCoordinator.sol # ★ Upgradeable (OZ Initializable + UUPSUpgradeable)
+│   │   │                        # Pure execution engine — reads config from AgentRegistry
 │   │   │                        # Runtime state only: winStreak, lastDecision, agentPaused
 │   │   │                        # lastOrderId (ASK) + lastBidOrderId (BID) — both cancelled each cycle
 │   │   │                        # basePrice: on-chain lastTradePrice when available, ETH oracle on cold start
@@ -358,18 +374,24 @@ somnia_hackathon/
 │   │   │                        # addAgentToList(): called by registry on agent registration
 │   │   │                        # winStreak → _orderAmount() (risk-level scaled)
 │   │   │                        # _coalitionCount: CoalitionFormed when 3 agents agree
-│   │   ├── AgentRegistry.sol    # Unified registry for ALL agents (system + user, string-ID keyed)
+│   │   ├── AgentRegistry.sol    # ★ Upgradeable (OZ Initializable + UUPSUpgradeable)
+│   │   │                        # Unified registry for ALL agents (system + user, string-ID keyed)
 │   │   │                        # registerAgent(): single entry point for all agent creation
 │   │   │                        # agentOwner: deployer for system agents, user wallet for custom
 │   │   │                        # systemPrompt, priceConfig, riskLevel stored here
 │   │   │                        # pauseAgent/resumeAgent: onlyOwner OR agentOwner[id]
 │   │   │                        # getSystemPrompt/getPriceConfig/getRiskLevel: view getters for coordinator
-│   │   ├── Treasury.sol         # per-agent balances
+│   │   ├── Treasury.sol         # ★ Upgradeable (OZ Initializable + UUPSUpgradeable)
+│   │   │                        # Per-agent STT balances: deposit / withdraw / allocate
 │   │   └── MockPlatform.sol     # local dev: simulates Somnia platform callbacks
 │   ├── scripts/
-│   │   ├── deploy.js            # testnet: deploys all contracts, sets on-chain prompts (5 agents)
-│   │   ├── seed.js              # testnet: registers agents, funds treasuries, mints sETH
-│   │   ├── deploy-local.js      # local: deploys to Hardhat, writes somnia-local.json (6 signers)
+│   │   ├── deploy.js            # testnet: deploys all 6 contracts as upgradeable UUPS proxies,
+│   │   │                        # registers all system agents via AgentRegistry.registerAgent()
+│   │   ├── seed.js              # testnet: funds agent treasuries, mints sETH to noise_trader
+│   │   ├── upgrade.js           # testnet/local: upgrades any/all proxies (address unchanged)
+│   │   │                        # flags: UPGRADE_COORDINATOR UPGRADE_REGISTRY UPGRADE_EXCHANGE
+│   │   │                        #        UPGRADE_TREASURY UPGRADE_AGENT_TOKEN UPGRADE_QUOTE_TOKEN
+│   │   ├── deploy-local.js      # local: deploys all 6 proxies to Hardhat, writes somnia-local.json
 │   │   ├── platform-daemon.js   # local: listens for MockPlatform events, fires price + LLM callbacks
 │   │   ├── test-local.js        # local: one-shot smoke test for the full decision cycle
 │   │   └── verify.js            # testnet: verifies contracts on Somnia explorer

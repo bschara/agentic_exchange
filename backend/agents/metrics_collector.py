@@ -147,9 +147,52 @@ class MetricsCollector:
                     if events:
                         from_block = max(e["block"] for e in events) + 1
 
+                # Apply any injected events (whale buys, crashes, etc.)
+                for ev in await self._state_bus.get_injected_events():
+                    try:
+                        await self._apply_injected_event(ev)
+                    except Exception as e:
+                        logger.error(f"Injected event apply error: {e}")
+
             except Exception as e:
                 logger.error(f"Trade event poll error: {e}")
             await asyncio.sleep(1.0)
+
+    # ── Event injection handler ───────────────────────────────────────────────
+
+    _SHOCK_MULTIPLIERS = {
+        "whale_buy":        1.03,
+        "whale_sell":       0.97,
+        "flash_crash":      0.92,
+        "news_event":       1.015,
+    }
+
+    async def _apply_injected_event(self, event: dict) -> None:
+        event_type = event["type"]
+        current_price = self._price_tracker.price
+        candle_updates: dict[int, dict] = {}
+
+        if event_type in self._SHOCK_MULTIPLIERS:
+            shocked = current_price * self._SHOCK_MULTIPLIERS[event_type]
+            bar = await self._state_bus.record_fill(shocked, 0.001)
+            if bar:
+                candle_updates[bar["time"]] = bar
+
+        elif event_type == "volatility_spike":
+            # 5 alternating ±2% ticks — makes the bar visibly spike high/low
+            base = current_price
+            for i in range(5):
+                factor = 1.02 if i % 2 == 0 else 0.98
+                base = base * factor
+                bar = await self._state_bus.record_fill(base, 0.001)
+                if bar:
+                    candle_updates[bar["time"]] = bar
+
+        current = self._price_tracker.get_current_bar()
+        if current:
+            candle_updates[current["time"]] = current
+        for bar in sorted(candle_updates.values(), key=lambda b: b["time"]):
+            await self._hub.broadcast({"type": "candle", "data": bar})
 
     def _record_pnl_from_trade(
         self, event: dict, buyer_id: Optional[str], seller_id: Optional[str]

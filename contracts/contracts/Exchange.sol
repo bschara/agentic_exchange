@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
+
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
 }
 
-contract Exchange {
+contract Exchange is Initializable, UUPSUpgradeable {
     struct Order {
         uint256 id;
         address agent;
@@ -33,16 +36,23 @@ contract Exchange {
     IERC20 public quoteToken;
     address public exchangeOwner;
 
-    uint256 private _nextOrderId = 1;
-    uint256 private _nextTradeId = 1;
+    uint256 private _nextOrderId;
+    uint256 private _nextTradeId;
 
     // QUOTE locked per BUY order — released to seller on fill, refunded on cancel
     mapping(uint256 => uint256) private _lockedQuote;
 
-    constructor(address _token, address _quoteToken) {
-        token = IERC20(_token);
-        quoteToken = IERC20(_quoteToken);
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address _token, address _quoteToken) external initializer {
+        token         = IERC20(_token);
+        quoteToken    = IERC20(_quoteToken);
         exchangeOwner = msg.sender;
+        _nextOrderId  = 1;
+        _nextTradeId  = 1;
     }
 
     // Last matched trade price — read by Python backend for real price discovery
@@ -311,6 +321,10 @@ contract Exchange {
     }
 
     // ── Emergency recovery (owner-only) ─────────────────────────────────────────
+
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == exchangeOwner, "Not owner");
+    }
 
     function emergencyWithdrawToken(address tokenAddr, uint256 amount) external {
         require(msg.sender == exchangeOwner, "Not owner");

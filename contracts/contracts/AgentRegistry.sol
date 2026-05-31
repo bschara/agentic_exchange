@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
+
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 interface IAgentCoordinator {
     function addAgentToList(string calldata agentId) external;
@@ -17,7 +20,7 @@ interface IAgentCoordinator {
 // priceUrl, selector, decimals). AgentCoordinator reads config via view
 // getters on each decision cycle — it owns only runtime state.
 //
-contract AgentRegistry {
+contract AgentRegistry is Initializable, UUPSUpgradeable {
     struct AgentInfo {
         // ── Ownership & display ────────────────────────────────────────────
         address agentOwner;   // deployer for system agents; user wallet for custom agents
@@ -67,10 +70,15 @@ contract AgentRegistry {
         _;
     }
 
-    // ── Constructor ───────────────────────────────────────────────────────────
+    // ── Constructor + Initializer ─────────────────────────────────────────────
 
-    constructor(address _coordinator) {
-        owner = msg.sender;
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address _owner, address _coordinator) external initializer {
+        owner       = _owner;
         coordinator = _coordinator;
     }
 
@@ -166,6 +174,8 @@ contract AgentRegistry {
     function getAgentsByOwner(address _owner) external view returns (string[] memory) {
         return ownerAgents[_owner];
     }
+
+    function _authorizeUpgrade(address) internal override onlyContractOwner {}
 
     function isRegistered(string calldata agentId) external view returns (bool) {
         return agents[agentId].agentOwner != address(0);

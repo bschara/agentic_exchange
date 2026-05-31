@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
-contract AgentToken {
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+
+contract AgentToken is Initializable, UUPSUpgradeable {
     string public name;
     string public symbol;
     uint8  public constant decimals = 18;
@@ -15,10 +18,15 @@ contract AgentToken {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    constructor(string memory _name, string memory _symbol) {
-        name   = _name;
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(string memory _name, string memory _symbol) external initializer {
+        name  = _name;
         symbol = _symbol;
-        owner  = msg.sender;
+        owner = msg.sender;
     }
 
     function mint(address to, uint256 amount) external {
@@ -40,6 +48,10 @@ contract AgentToken {
         allowance[msg.sender][spender] = amount;
         emit Approval(msg.sender, spender, amount);
         return true;
+    }
+
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == owner, "Not owner");
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {

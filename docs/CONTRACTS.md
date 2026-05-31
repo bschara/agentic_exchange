@@ -1,6 +1,6 @@
 # Contracts — Agentic Exchange
 
-Six Solidity contracts on Somnia testnet (chain 50312). `AgentToken.sol` is a mintable ERC20 (`sETH`, Somnia ETH) — the base asset being traded. `QuoteToken.sol` is a USDC-equivalent ERC20 with a public testnet faucet — the payment currency for BUY orders. `Exchange.sol` is a real on-chain limit order book with two-token settlement: BUY orders lock USDC, SELL orders lock sETH; fills pay both parties atomically. `AgentCoordinator.sol` routes agents through Somnia's native LLM inference agent for on-chain validator consensus — with peer signal injection, adaptive order sizing via win streaks, coalition orders when 3 agents agree, cancel-before-place, Market Maker dual-sided quoting, and **trustless user agent registration** all built in. A 5th system agent (noise_trader) places orders directly from Python without the coordinator.
+Six Solidity contracts on Somnia testnet (chain 50312) — **all deployed as upgradeable UUPS proxies** via OpenZeppelin's `Initializable` + `UUPSUpgradeable` (UUPS pattern). `AgentToken.sol` is a mintable ERC20 (`sETH`, Somnia ETH) — the base asset being traded. `QuoteToken.sol` is a USDC-equivalent ERC20 with a public testnet faucet — the payment currency for BUY orders. `Exchange.sol` is a real on-chain limit order book with two-token settlement: BUY orders lock USDC, SELL orders lock sETH; fills pay both parties atomically. `AgentCoordinator.sol` routes agents through Somnia's native LLM inference agent for on-chain validator consensus — with peer signal injection, adaptive order sizing via win streaks, coalition orders when 3 agents agree, cancel-before-place, Market Maker dual-sided quoting, and **trustless user agent registration** all built in. A 5th system agent (noise_trader) places orders directly from Python without the coordinator.
 
 ---
 
@@ -8,28 +8,54 @@ Six Solidity contracts on Somnia testnet (chain 50312). `AgentToken.sol` is a mi
 
 ```
 contracts/
-├── hardhat.config.js        # Solidity 0.8.20, Somnia + localhost networks (6 gwei)
-├── package.json             # type: "module" (ESM), hardhat + ethers v6 deps
+├── hardhat.config.js        # Solidity 0.8.22, Somnia + localhost networks, @openzeppelin/hardhat-upgrades
+├── package.json             # type: "module" (ESM); deps: hardhat, ethers v6,
+│                            # @openzeppelin/contracts, @openzeppelin/hardhat-upgrades
 ├── .env                     # Private keys — NOT committed (see .gitignore)
 ├── contracts/
-│   ├── AgentToken.sol       # Mintable ERC20 (sETH / Somnia ETH): owner-mint, no OZ dependency
-│   ├── QuoteToken.sol       # USDC-equivalent ERC20 with public faucet(); payment currency for BUY orders
-│   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
+│   ├── AgentToken.sol       # ★ Upgradeable — inherits OZ Initializable + UUPSUpgradeable; deployed as UUPS proxy
+│   │                        # Mintable ERC20 (sETH / Somnia ETH): owner-mint, unlimited supply
+│   │                        # constructor() → _disableInitializers()
+│   │                        # initialize(name, symbol) — sets name, symbol, owner = msg.sender
+│   ├── QuoteToken.sol       # ★ Upgradeable — inherits OZ Initializable + UUPSUpgradeable; deployed as UUPS proxy
+│   │                        # USDC-equivalent ERC20 with public faucet(); payment currency for BUY orders
+│   │                        # constructor() → _disableInitializers()
+│   │                        # initialize() — sets name="USD Coin", symbol="USDC", owner = msg.sender
+│   ├── Exchange.sol         # ★ Upgradeable — inherits OZ Initializable + UUPSUpgradeable; deployed as UUPS proxy
+│   │                        # Real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
 │   │                        # BUY locks USDC, SELL locks sETH; fills pay both sides atomically
-│   ├── AgentCoordinator.sol # IAgentRequester integration — Somnia LLM for all 4 agents + approveToken()
-│   ├── AgentRegistry.sol    # Unified registry: registerAgent(), pauseAgent/resumeAgent, config view getters
-│   ├── Treasury.sol         # Per-agent ETH balances (deposit / withdraw / allocate)
+│   │                        # constructor() → _disableInitializers()
+│   │                        # initialize(token, quoteToken) — wires tokens + seeds _nextOrderId/TradeId = 1
+│   ├── AgentCoordinator.sol # ★ Upgradeable — inherits OZ Initializable + UUPSUpgradeable; deployed as UUPS proxy
+│   │                        # constructor(platform, exchange) sets immutables + _disableInitializers()
+│   │                        # initialize(owner, llmAgentId, jsonApiAgentId) called once via proxy
+│   │                        # Somnia LLM integration, peer signals, coalition, win streaks, approveToken()
+│   ├── AgentRegistry.sol    # ★ Upgradeable — inherits OZ Initializable + UUPSUpgradeable; deployed as UUPS proxy
+│   │                        # constructor() → _disableInitializers()
+│   │                        # initialize(owner, coordinator) called once via proxy
+│   │                        # registerAgent(), pauseAgent/resumeAgent, config view getters
+│   ├── Treasury.sol         # ★ Upgradeable — inherits OZ Initializable + UUPSUpgradeable; deployed as UUPS proxy
+│   │                        # Per-agent STT balances (deposit / withdraw / allocate)
+│   │                        # constructor() → _disableInitializers()
+│   │                        # initialize() — sets owner = msg.sender
 │   └── MockPlatform.sol     # Local dev: simulates Somnia IAgentRequester callbacks
 ├── scripts/
-│   ├── deploy.js            # Testnet: deploys all 4 contracts, sets on-chain system prompts, writes JSON
-│   ├── seed.js              # Testnet: registers 5 agents in registry, funds each in treasury
+│   ├── deploy.js            # Testnet: deploys all 6 contracts as UUPS proxies via
+│   │                        # hre.upgrades.deployProxy(); registers all agents via registerAgent()
+│   ├── seed.js              # Testnet: funds agent treasuries, mints sETH to noise_trader
+│   ├── upgrade.js           # Testnet/local: upgrades any/all of the 6 proxy contracts
+│   │                        # Usage: npx hardhat run scripts/upgrade.js --network somnia
+│   │                        # All upgrade by default; disable any with env flags:
+│   │                        #   UPGRADE_COORDINATOR, UPGRADE_REGISTRY, UPGRADE_EXCHANGE,
+│   │                        #   UPGRADE_TREASURY, UPGRADE_AGENT_TOKEN, UPGRADE_QUOTE_TOKEN
 │   ├── verify.js            # Testnet: sanity check — reads agent list + balances from live contracts
-│   ├── deploy-local.js      # Local: deploys to Hardhat node, writes somnia-local.json (zero-config)
+│   ├── deploy-local.js      # Local: deploys proxies to Hardhat node, writes somnia-local.json (zero-config)
 │   ├── platform-daemon.js   # Local: watches MockPlatform events, fires price + LLM callbacks
 │   └── test-local.js        # Local: one-shot smoke test for the full 3-tx decision cycle
 ├── deployments/
-│   ├── somnia-testnet.json  # Auto-generated by deploy.js: addresses + ABIs (no secrets)
-│   └── somnia-local.json    # Auto-generated by deploy-local.js: addresses + ABIs + Hardhat agent PKs
+│   ├── somnia-testnet.json  # Auto-generated by deploy.js: proxy addresses + ABIs (no secrets)
+│   │                        # AgentCoordinator.implementation / upgradedAt added by upgrade.js
+│   └── somnia-local.json    # Auto-generated by deploy-local.js: proxy addresses + ABIs + Hardhat PKs
 ├── artifacts/               # Hardhat build output (gitignored)
 └── cache/                   # Hardhat compile cache (gitignored)
 ```
@@ -102,15 +128,16 @@ Output:
 
 ```
 Deploying contracts with: 0xAbCd...
-AgentToken deployed to:        0x0000...
-Exchange deployed to:          0x1111...
-AgentRegistry deployed to:     0x2222...
-Treasury deployed to:          0x3333...
-AgentCoordinator deployed to:  0x4444...
-API config set on-chain for market_maker
-...
-System prompt set on-chain for market_maker
-...
+AgentToken (proxy) deployed to:       0x0000...   ← stable address forever
+QuoteToken (proxy) deployed to:       0x1111...   ← stable address forever
+Exchange (proxy) deployed to:         0x2222...   ← stable address forever
+Treasury (proxy) deployed to:         0x3333...   ← stable address forever
+AgentCoordinator (proxy) deployed to: 0x4444...   ← stable address forever
+AgentRegistry (proxy) deployed to:    0x5555...   ← stable address forever
+coordinator.setRegistry() done
+─── Registering system agents via AgentRegistry ───
+  market_maker: registered (icon=⚖️, risk=3)
+  ...
 AgentCoordinator funded with 0.2 STT
 Minted 10M sETH to AgentCoordinator
 AgentCoordinator approved Exchange for sETH
@@ -119,10 +146,11 @@ AgentCoordinator approved Exchange for USDC
 
 ─── Add to backend/.env ───────────────────────────
 AGENT_TOKEN_ADDRESS=0x0000...
-EXCHANGE_ADDRESS=0x1111...
-AGENT_REGISTRY_ADDRESS=0x2222...
+QUOTE_TOKEN_ADDRESS=0x1111...
+EXCHANGE_ADDRESS=0x2222...
 TREASURY_ADDRESS=0x3333...
 AGENT_COORDINATOR_ADDRESS=0x4444...
+AGENT_REGISTRY_ADDRESS=0x5555...
 ───────────────────────────────────────────────────
 ```
 
@@ -150,13 +178,17 @@ Copy the printed env vars into `backend/.env`, then restart the backend with `./
 
 ## Contract Reference
 
-### `AgentToken.sol`
+### `AgentToken.sol` ★ Upgradeable
 
-Minimal owner-mintable ERC20 token (symbol `sETH`, name `Somnia ETH`). No OpenZeppelin dependency — fully self-contained. Represents synthetic ETH on Somnia — the base asset being traded.
+Owner-mintable ERC20 token (symbol `sETH`, name `Somnia ETH`). Deployed as an upgradeable UUPS proxy. Represents synthetic ETH on Somnia — the base asset being traded.
 
-### `QuoteToken.sol`
+**Upgradeability:** Constructor calls `_disableInitializers()`. The proxy calls `initialize(string name, string symbol)` once — sets `name`, `symbol`, and `owner = msg.sender` (the deployer). All token balances live in the proxy's storage and survive upgrades.
 
-Minimal ERC20 token (symbol `USDC`, name `USD Coin`). Payment currency in the sETH/USDC market. Features a permissionless `faucet()` function (mints 10,000 USDC to caller) for testnet use. Owner-only `mint()` is called by the backend orchestrator for auto-replenishment.
+### `QuoteToken.sol` ★ Upgradeable
+
+ERC20 token (symbol `USDC`, name `USD Coin`). Payment currency in the sETH/USDC market. Deployed as an upgradeable UUPS proxy. Features a permissionless `faucet()` function (mints 10,000 USDC to caller) for testnet use. Owner-only `mint()` is called by the backend orchestrator for auto-replenishment.
+
+**Upgradeability:** Constructor calls `_disableInitializers()`. The proxy calls `initialize()` once — sets `name`, `symbol`, and `owner = msg.sender`. The `FAUCET_AMOUNT` and `FAUCET_COOLDOWN` are `constant` (bytecode) and do not need initialization.
 
 **Functions:**
 | Function | Access | Description |
@@ -183,19 +215,19 @@ event Approval(address indexed owner, address indexed spender, uint256 value);
 
 ---
 
-### `Exchange.sol`
+### `Exchange.sol` ★ Upgradeable
 
-Real on-chain limit order book with two-token settlement (sETH/USDC). Every `placeOrder()` call triggers `_matchOrder()` immediately. `lastTradePrice` is updated on every fill and is used by `AgentCoordinator` as the order reference price for subsequent cycles — enabling real on-chain price discovery.
+Real on-chain limit order book with two-token settlement (sETH/USDC). Deployed as an upgradeable UUPS proxy. Every `placeOrder()` call triggers `_matchOrder()` immediately. `lastTradePrice` is updated on every fill and is used by `AgentCoordinator` as the order reference price for subsequent cycles — enabling real on-chain price discovery.
+
+**Upgradeability:** Constructor calls `_disableInitializers()`. The proxy calls `initialize(address token, address quoteToken)` — wires both ERC20 tokens, sets `exchangeOwner = msg.sender`, and seeds `_nextOrderId = _nextTradeId = 1` (inline `= 1` defaults would be lost in proxy storage; must be set explicitly in the initializer).
 
 **Token flow:**
 
-- `placeOrder(true,  ...)` (BUY)  → `quoteToken.transferFrom(msg.sender, address(this), price*amount/1e18)` — locks USDC
+- `placeOrder(true,  ...)` (BUY) → `quoteToken.transferFrom(msg.sender, address(this), price*amount/1e18)` — locks USDC
 - `placeOrder(false, ...)` (SELL) → `token.transferFrom(msg.sender, address(this), amount)` — locks sETH
 - `_recordTrade()` → `token.transfer(buyer, fill)` + `quoteToken.transfer(seller, quote)` — atomic two-sided settlement; partial fills prorate the USDC; final fill drains the remainder to avoid dust
-- `cancelOrder()` on a BUY  → `quoteToken.transfer(order.agent, lockedQuote)` — refunds unfilled USDC
+- `cancelOrder()` on a BUY → `quoteToken.transfer(order.agent, lockedQuote)` — refunds unfilled USDC
 - `cancelOrder()` on a SELL → `token.transfer(order.agent, remaining)` — refunds unfilled sETH
-
-Constructor: `constructor(address _token, address _quoteToken)` — Exchange is wired to both sETH and USDC at deployment.
 
 **Structs:**
 
@@ -254,9 +286,11 @@ event TradeExecuted(uint256 indexed tradeId, uint256 buyOrderId, uint256 sellOrd
 
 ---
 
-### `AgentCoordinator.sol`
+### `AgentCoordinator.sol` ★ Upgradeable
 
 Pure execution engine for the on-chain LLM decision loop. All agent configuration (system prompts, price config, risk level) is owned by `AgentRegistry` and read via view calls. The coordinator owns only runtime state.
+
+**Upgradeability:** Deployed as a UUPS proxy (`ERC1967Proxy` + `UUPSUpgradeable`). The constructor only sets two `immutable` fields (`platform`, `exchange`) and calls `_disableInitializers()` to prevent anyone from calling `initialize()` on the bare implementation. The proxy calls `initialize(owner, llmAgentId, jsonApiAgentId)` exactly once at first deploy. Upgrades go through `_authorizeUpgrade()` — gated to `onlyOwner` — so only the deployer can swap the implementation. To upgrade: deploy a new implementation and run `scripts/upgrade.js` — proxy address stays the same, all on-chain state is preserved.
 
 **Constants:**
 
@@ -318,9 +352,11 @@ event AgentResumed(string agentId);
 
 ---
 
-### `AgentRegistry.sol`
+### `AgentRegistry.sol` ★ Upgradeable
 
 Unified registry and source of truth for **all** agents — system agents (owned by deployer) and user-defined agents (owned by any wallet). Stores ownership, display metadata, and all agent configuration. The coordinator reads config from here via view getters on each decision cycle.
+
+**Upgradeability:** Same UUPS proxy pattern as `AgentCoordinator`. The constructor only calls `_disableInitializers()`; the proxy calls `initialize(owner, coordinator)` once at deploy. Upgrades are gated by `_authorizeUpgrade()` → `onlyContractOwner`. All user agent registrations survive upgrades because they live in the proxy's storage, not the implementation.
 
 **Struct:**
 
@@ -364,9 +400,11 @@ event AgentResumed(string indexed agentId, address indexed caller);
 
 ---
 
-### `Treasury.sol`
+### `Treasury.sol` ★ Upgradeable
 
-Tracks per-agent STT balances. Owner can allocate between agents for simulated P&L settlement.
+Tracks per-agent STT balances. Deployed as an upgradeable UUPS proxy. Owner can allocate between agents for simulated P&L settlement.
+
+**Upgradeability:** Constructor calls `_disableInitializers()`. The proxy calls `initialize()` once — sets `owner = msg.sender` (the deployer). All balance mappings live in the proxy's storage and survive upgrades.
 
 **Storage:**
 
@@ -411,7 +449,7 @@ cd contracts && npx hardhat node
 npx hardhat run scripts/deploy-local.js --network localhost
 ```
 
-This deploys `MockPlatform`, `Exchange`, `AgentRegistry`, `Treasury`, and `AgentCoordinator`, configures all 5 agent prompts and configs on-chain, funds the coordinator with 10 ETH, registers all 5 agents in the registry, and deposits 0.1 ETH per agent in the treasury. Uses 6 Hardhat signers (deployer + 5 agent wallets, accounts #0–#5). Writes `deployments/somnia-local.json` and prints the env vars to paste into `backend/.env`.
+This deploys `MockPlatform` and all six contracts (`AgentToken`, `QuoteToken`, `Exchange`, `Treasury`, `AgentCoordinator`, `AgentRegistry`) as UUPS proxies via `hre.upgrades.deployProxy()`. It then calls `registerAgent()` for all 5 system agents (storing prompts + price config in the registry), funds the coordinator with 10 ETH, and deposits 0.1 ETH per agent in the treasury. Uses 6 Hardhat signers (deployer + 5 agent wallets, accounts #0–#5). Writes `deployments/somnia-local.json` with proxy addresses and prints the env vars to paste into `backend/.env`.
 
 ### Step 3 — Start the platform daemon (keep running)
 
@@ -448,19 +486,44 @@ Runs one full decision cycle per agent manually (no daemon needed), verifying `D
 
 ### `scripts/deploy.js`
 
+All six contracts are deployed as upgradeable UUPS proxies via `hre.upgrades.deployProxy()`. Proxy addresses are stable forever.
+
 1. Gets deployer signer from hardhat
-2. Deploys `AgentToken` (symbol `sETH`)
-3. Deploys `QuoteToken` (symbol `USDC`) — testnet payment currency with public faucet
-4. Deploys `Exchange(tokenAddr, quoteTokenAddr)` — Exchange is wired to both sETH and USDC at construction
-4. Deploys `AgentRegistry`, `Treasury`, `AgentCoordinator` sequentially
-5. Calls `AgentCoordinator.setAgentConfig()` and `setSystemPrompt()` for all 5 agents — prompts and price-fetch config stored on-chain
-6. Funds `AgentCoordinator` with 0.2 STT for LLM inference deposits
-7. Mints 10 million sETH to the coordinator (shared pool for 4 on-chain agents)
-8. Mints 10 million USDC to the coordinator and approves Exchange for USDC
-8. Calls `coordinator.approveToken(tokenAddr, exchangeAddr, MaxUint256)` — grants Exchange a max spending allowance over the pool
-9. Reads compiled ABIs from `artifacts/`
-10. Writes `deployments/somnia-testnet.json` with addresses + ABIs
-11. Prints the exact env vars to copy into `backend/.env` (including `AGENT_TOKEN_ADDRESS`)
+2. Deploys `AgentToken` proxy — `initialize('Somnia ETH', 'sETH')`
+3. Deploys `QuoteToken` proxy — `initialize()` (sets name/symbol/owner)
+4. Deploys `Exchange` proxy — `initialize(tokenAddr, quoteTokenAddr)`
+5. Deploys `Treasury` proxy — `initialize()` (sets owner)
+6. Deploys `AgentCoordinator` proxy — constructor immutables `(platform, exchange)` + `initialize(owner, llmAgentId, jsonApiAgentId)`
+7. Deploys `AgentRegistry` proxy — `initialize(owner, coordinatorAddr)`, then calls `coordinator.setRegistry()`
+8. Calls `registry.registerAgent()` for all 5 system agents — stores prompts + price config in registry
+9. Funds `AgentCoordinator` with 0.2 STT for LLM inference deposits
+10. Mints 10 million sETH + 10 million USDC to the coordinator, approves Exchange for both
+11. Reads compiled ABIs from `artifacts/`
+12. Writes `deployments/somnia-testnet.json` with proxy addresses + ABIs
+13. Prints proxy addresses to copy into `backend/.env`
+
+### `scripts/upgrade.js`
+
+Upgrades any or all of the six proxy contracts to a new implementation without changing the proxy address or losing any on-chain state.
+
+```bash
+# Upgrade all 6 (default)
+npx hardhat run scripts/upgrade.js --network somnia
+
+# Upgrade only specific contracts (set unwanted to "false")
+UPGRADE_EXCHANGE=false UPGRADE_TREASURY=false npx hardhat run scripts/upgrade.js --network somnia
+```
+
+Available flags (all default to `true`): `UPGRADE_COORDINATOR`, `UPGRADE_REGISTRY`, `UPGRADE_EXCHANGE`, `UPGRADE_TREASURY`, `UPGRADE_AGENT_TOKEN`, `UPGRADE_QUOTE_TOKEN`.
+
+Steps per contract:
+
+1. Reads proxy address from `deployments/somnia-testnet.json`
+2. Deploys new implementation contract
+3. Calls `proxyAdmin.upgrade(proxy, newImpl)` via the OZ upgrades plugin
+4. Writes the new implementation address + `upgradedAt` timestamp back to the deployment JSON
+
+The coordinator's self-triggering loop continues uninterrupted through the upgrade — no backend restart needed.
 
 **Output file format** (`deployments/somnia-testnet.json`):
 
@@ -563,15 +626,15 @@ The backend (`blockchain/client.py`) also hardcodes the same value.
 
 ## Troubleshooting
 
-| Symptom                                         | Cause                                           | Fix                                                                                                  |
-| ----------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `deploy.js` fails with "insufficient funds"     | Deployer wallet needs more STT                  | Fund via faucet, allow a few seconds for balance to propagate                                        |
-| `deploy.js` fails with "invalid private key"    | Placeholder PK in `.env`                        | Fill real `DEPLOYER_PRIVATE_KEY`                                                                     |
-| `seed.js` throws "Cannot read deployments"      | `deploy.js` hasn't been run                     | Run `deploy.js` first                                                                                |
-| `seed.js` skips all agents                      | Agent PKs are still placeholder `0x_...`        | Fill all 5 agent PKs in `.env`                                                                       |
-| SELL order reverts with "Token transfer failed" | Agent wallet has no sETH or no Exchange approval | Run `seed.js` again; for coordinator SELL orders call `approveToken()` with a funded deployer wallet |
-| BUY order reverts with "QUOTE transfer failed" | Coordinator or noise_trader has no USDC or no Exchange USDC approval | Wait for orchestrator auto-replenishment (triggers when balance < 1,000 USDC); or call `coordinator.approveToken(quoteAddr, exchangeAddr, max)` manually |
-| `seed.js` skips gas funding for a wallet        | Balance already ≥ 0.01 STT                      | Normal — script is idempotent; no action needed                                                      |
-| `verify.js` shows 0 agents                      | `seed.js` was skipped or failed                 | Run `seed.js`                                                                                        |
-| Backend logs "contract not found"               | `backend/.env` still has placeholder addresses  | Copy the addresses printed by `deploy.js`                                                            |
-| Tx reverted on testnet                          | Gas too low or nonce conflict                   | Gas is hardcoded (shouldn't be the issue); nonce conflicts are handled by per-wallet Lock in backend |
+| Symptom                                         | Cause                                                                | Fix                                                                                                                                                      |
+| ----------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deploy.js` fails with "insufficient funds"     | Deployer wallet needs more STT                                       | Fund via faucet, allow a few seconds for balance to propagate                                                                                            |
+| `deploy.js` fails with "invalid private key"    | Placeholder PK in `.env`                                             | Fill real `DEPLOYER_PRIVATE_KEY`                                                                                                                         |
+| `seed.js` throws "Cannot read deployments"      | `deploy.js` hasn't been run                                          | Run `deploy.js` first                                                                                                                                    |
+| `seed.js` skips all agents                      | Agent PKs are still placeholder `0x_...`                             | Fill all 5 agent PKs in `.env`                                                                                                                           |
+| SELL order reverts with "Token transfer failed" | Agent wallet has no sETH or no Exchange approval                     | Run `seed.js` again; for coordinator SELL orders call `approveToken()` with a funded deployer wallet                                                     |
+| BUY order reverts with "QUOTE transfer failed"  | Coordinator or noise_trader has no USDC or no Exchange USDC approval | Wait for orchestrator auto-replenishment (triggers when balance < 1,000 USDC); or call `coordinator.approveToken(quoteAddr, exchangeAddr, max)` manually |
+| `seed.js` skips gas funding for a wallet        | Balance already ≥ 0.01 STT                                           | Normal — script is idempotent; no action needed                                                                                                          |
+| `verify.js` shows 0 agents                      | `seed.js` was skipped or failed                                      | Run `seed.js`                                                                                                                                            |
+| Backend logs "contract not found"               | `backend/.env` still has placeholder addresses                       | Copy the addresses printed by `deploy.js`                                                                                                                |
+| Tx reverted on testnet                          | Gas too low or nonce conflict                                        | Gas is hardcoded (shouldn't be the issue); nonce conflicts are handled by per-wallet Lock in backend                                                     |

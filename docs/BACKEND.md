@@ -331,7 +331,7 @@ ABI loading: tries `contracts/deployments/somnia-testnet.json` first, then `somn
 
 ### Change a strategy prompt
 
-Edit the `setSystemPrompt` calls in `contracts/scripts/deploy.js` and redeploy. System prompts are stored on-chain in `AgentCoordinator` and passed to the Somnia LLM inference agent on each decision cycle.
+Update the `prompt` field for the relevant agent in `contracts/scripts/deploy.js` (inside `AGENT_META`) and redeploy. System prompts are stored on-chain in `AgentRegistry` and read by the coordinator via `registry.getSystemPrompt(agentId)` on each decision cycle. With upgradeable proxies, you can also upgrade only the registry implementation if you want to add a config migration function.
 
 ### Add a new agent
 
@@ -340,7 +340,7 @@ Edit the `setSystemPrompt` calls in `contracts/scripts/deploy.js` and redeploy. 
 1. Add entry to `AGENT_CONFIGS` in `agents/orchestrator.py`
 2. Add `new_agent_pk` field to `config.py`
 3. Add wallet PK to `backend/.env`
-4. Add `setSystemPrompt` + `setAgentConfig` calls in `contracts/scripts/deploy.js`
+4. Add a `registerAgent()` call for the new agent in `contracts/scripts/deploy.js`
 5. Register + fund in `contracts/scripts/seed.js`
 6. The orchestrator fires `triggerAgentDecision()` automatically for all `AGENT_CONFIGS` entries at startup
 

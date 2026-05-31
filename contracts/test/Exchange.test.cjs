@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 const P = (x) => ethers.parseEther(String(x));
@@ -7,23 +7,37 @@ const P = (x) => ethers.parseEther(String(x));
 describe("Exchange", function () {
   async function deployFixture() {
     const [owner, buyer, seller, agent3] = await ethers.getSigners();
-    const token    = await ethers.deployContract("AgentToken", ["Test Token", "TST"]);
-    const tokenAddr = await token.getAddress();
-    const exchange = await ethers.deployContract("Exchange", [tokenAddr]);
+    const tokenF = await ethers.getContractFactory("AgentToken");
+    const token  = await upgrades.deployProxy(tokenF, ["Test Token", "TST"], { kind: "transparent", initializer: "initialize" });
+    await token.waitForDeployment();
+    const quoteF     = await ethers.getContractFactory("QuoteToken");
+    const quoteToken = await upgrades.deployProxy(quoteF, [], { kind: "transparent", initializer: "initialize" });
+    await quoteToken.waitForDeployment();
+    const tokenAddr  = await token.getAddress();
+    const exchangeF  = await ethers.getContractFactory("Exchange");
+    const exchange   = await upgrades.deployProxy(exchangeF, [tokenAddr, await quoteToken.getAddress()], { kind: "transparent", initializer: "initialize" });
+    await exchange.waitForDeployment();
     const exchangeAddr = await exchange.getAddress();
 
     const MINT = ethers.parseEther("1000000");
+    // Mint sETH (sell-side collateral) to all sellers
     await token.mint(seller.address, MINT);
     await token.mint(agent3.address, MINT);
-    // buyer may act as seller in some tests
     await token.mint(buyer.address, MINT);
+    // Mint QUOTE (buy-side collateral) to all buyers
+    await quoteToken.mint(buyer.address, MINT);
+    await quoteToken.mint(agent3.address, MINT);
+    await quoteToken.mint(seller.address, MINT);
 
     const MAX = ethers.MaxUint256;
     await token.connect(seller).approve(exchangeAddr, MAX);
     await token.connect(agent3).approve(exchangeAddr, MAX);
     await token.connect(buyer).approve(exchangeAddr, MAX);
+    await quoteToken.connect(buyer).approve(exchangeAddr, MAX);
+    await quoteToken.connect(agent3).approve(exchangeAddr, MAX);
+    await quoteToken.connect(seller).approve(exchangeAddr, MAX);
 
-    return { exchange, token, owner, buyer, seller, agent3 };
+    return { exchange, token, quoteToken, owner, buyer, seller, agent3 };
   }
 
   describe("placeOrder(isBuy, price, amount)", function () {

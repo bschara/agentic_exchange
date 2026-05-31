@@ -1,11 +1,13 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("Treasury", function () {
   async function deployFixture() {
     const [owner, agent1, agent2] = await ethers.getSigners();
-    const treasury = await ethers.deployContract("Treasury");
+    const TreasuryFactory = await ethers.getContractFactory("Treasury");
+    const treasury = await upgrades.deployProxy(TreasuryFactory, [], { kind: "transparent", initializer: "initialize" });
+    await treasury.waitForDeployment();
     return { treasury, owner, agent1, agent2 };
   }
 

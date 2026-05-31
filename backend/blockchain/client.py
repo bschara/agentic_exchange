@@ -78,6 +78,12 @@ async def send_transaction(
                 timeout=35,
             )
             logger.info(f"Tx confirmed: {tx_hash.hex()} block={receipt.blockNumber}")
+            # Re-sync after confirmation — the daemon may have used this key
+            # while we waited, advancing the chain nonce past our cached value.
+            try:
+                _nonces[address] = w3.eth.get_transaction_count(address, "pending")
+            except Exception:
+                pass
             return tx_hash.hex()
 
         except asyncio.TimeoutError:

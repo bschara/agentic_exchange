@@ -91,64 +91,89 @@ async function main() {
   const mockPlatformAddr = await mockPlatform.getAddress();
   console.log('MockPlatform:      ', mockPlatformAddr);
 
-  // 2. AgentToken
+  // 2. AgentToken — upgradeable proxy
   const AgentToken = await hre.ethers.getContractFactory('AgentToken');
-  const token = await AgentToken.deploy('Somnia ETH', 'sETH');
+  const token = await hre.upgrades.deployProxy(
+    AgentToken,
+    ['Somnia ETH', 'sETH'],
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await token.waitForDeployment();
   const tokenAddr = await token.getAddress();
-  console.log('AgentToken:        ', tokenAddr);
+  console.log('AgentToken (proxy):', tokenAddr);
 
-  // 3. QuoteToken (USDC-equivalent for testnet)
+  // 3. QuoteToken (USDC-equivalent for testnet) — upgradeable proxy
   const QuoteToken = await hre.ethers.getContractFactory('QuoteToken');
-  const quoteToken = await QuoteToken.deploy();
+  const quoteToken = await hre.upgrades.deployProxy(
+    QuoteToken,
+    [],
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await quoteToken.waitForDeployment();
   const quoteTokenAddr = await quoteToken.getAddress();
-  console.log('QuoteToken:        ', quoteTokenAddr);
+  console.log('QuoteToken (proxy):', quoteTokenAddr);
 
-  // 4. Exchange (sETH/USDC market)
+  // 4. Exchange (sETH/USDC market) — upgradeable proxy
   const Exchange = await hre.ethers.getContractFactory('Exchange');
-  const exchange = await Exchange.deploy(tokenAddr, quoteTokenAddr);
+  const exchange = await hre.upgrades.deployProxy(
+    Exchange,
+    [tokenAddr, quoteTokenAddr],
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await exchange.waitForDeployment();
   const exchangeAddr = await exchange.getAddress();
-  console.log('Exchange:          ', exchangeAddr);
+  console.log('Exchange (proxy):  ', exchangeAddr);
 
-  // 5. Treasury
+  // 5. Treasury — upgradeable proxy
   const Treasury = await hre.ethers.getContractFactory('Treasury');
-  const treasury = await Treasury.deploy();
+  const treasury = await hre.upgrades.deployProxy(
+    Treasury,
+    [],
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await treasury.waitForDeployment();
   const treasuryAddr = await treasury.getAddress();
-  console.log('Treasury:          ', treasuryAddr);
+  console.log('Treasury (proxy):  ', treasuryAddr);
 
-  // 6. AgentCoordinator — deployed BEFORE registry (registry needs coordinator address)
+  // 6. AgentCoordinator — upgradeable proxy
+  //    constructor sets immutables (platform, exchange)
+  //    initialize() sets owner + agent IDs (called via proxy on first deploy)
   const AgentCoordinator = await hre.ethers.getContractFactory('AgentCoordinator');
-  const coordinator = await AgentCoordinator.deploy(
-    mockPlatformAddr,
-    exchangeAddr,
-    1n,
-    1n
+  const coordinator = await hre.upgrades.deployProxy(
+    AgentCoordinator,
+    [deployer.address, 1n, 1n],          // initialize(owner, llmAgentId, jsonApiAgentId)
+    {
+      kind: 'uups',
+      constructorArgs: [mockPlatformAddr, exchangeAddr],
+      initializer: 'initialize',
+    }
   );
   await coordinator.waitForDeployment();
   const coordinatorAddr = await coordinator.getAddress();
-  console.log('AgentCoordinator:  ', coordinatorAddr);
+  console.log('AgentCoordinator (proxy):', coordinatorAddr);
 
-  // 7. AgentRegistry — takes coordinator address in constructor
+  // 7. AgentRegistry — upgradeable proxy
   const AgentRegistry = await hre.ethers.getContractFactory('AgentRegistry');
-  const registry = await AgentRegistry.deploy(coordinatorAddr);
+  const registry = await hre.upgrades.deployProxy(
+    AgentRegistry,
+    [deployer.address, coordinatorAddr],  // initialize(owner, coordinator)
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
-  console.log('AgentRegistry:     ', registryAddr);
+  console.log('AgentRegistry (proxy):   ', registryAddr);
 
   // 8. Wire registry into coordinator so registry can call onlyOwnerOrRegistry functions
   await (await coordinator.setRegistry(registryAddr)).wait();
   console.log('coordinator.setRegistry() done');
 
   // 9. Mint sETH + USDC to coordinator, approve Exchange for both
-  await (await token.mint(coordinatorAddr, hre.ethers.parseEther('10000000'))).wait();
-  console.log('Minted 10M sETH to AgentCoordinator');
+  await (await token.mint(coordinatorAddr, hre.ethers.parseEther('10000'))).wait();
+  console.log('Minted 10K sETH to AgentCoordinator');
   await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
   console.log('AgentCoordinator approved Exchange for sETH');
-  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('10000000'))).wait();
-  console.log('Minted 10M QUOTE to AgentCoordinator');
+  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('10000'))).wait();
+  console.log('Minted 10K QUOTE to AgentCoordinator');
   await (await coordinator.approveToken(quoteTokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
   console.log('AgentCoordinator approved Exchange for QUOTE');
 
@@ -173,8 +198,8 @@ async function main() {
   }
 
   // 11. Fund coordinator with ETH for Somnia platform deposits
-  await (await coordinator.fund({ value: hre.ethers.parseEther('10.0') })).wait();
-  console.log('\nCoordinator funded: 10.0 ETH');
+  await (await coordinator.fund({ value: hre.ethers.parseEther('0.5') })).wait();
+  console.log('\nCoordinator funded: 0.5 ETH');
 
   // 12. Fund agent treasuries + mint sETH + USDC to noise_trader
   console.log('\n─── Funding agent treasuries ───────────────────────────────');
@@ -187,9 +212,9 @@ async function main() {
   const noiseSigner = agentSigners[4];
   await (await token.mint(noiseSigner.address, hre.ethers.parseEther('10000'))).wait();
   await (await token.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
-  await (await quoteToken.mint(noiseSigner.address, hre.ethers.parseEther('10000000'))).wait();
+  await (await quoteToken.mint(noiseSigner.address, hre.ethers.parseEther('10000'))).wait();
   await (await quoteToken.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
-  console.log(`\nNoise trader: 10,000 sETH + 10M QUOTE + Exchange approved (${noiseSigner.address})`);
+  console.log(`\nNoise trader: 10,000 sETH + 10K QUOTE + Exchange approved (${noiseSigner.address})`);
 
   // 13. Write deployment JSON
   const mockArtifact  = await hre.artifacts.readArtifact('MockPlatform');

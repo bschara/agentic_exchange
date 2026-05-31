@@ -5,7 +5,7 @@ import re
 logger = logging.getLogger(__name__)
 
 _TOPUP_THRESHOLD = 1_000.0
-_TOPUP_AMOUNT = 10_000_000.0
+_TOPUP_AMOUNT    = 10_000.0
 _ZERO = "0x0000000000000000000000000000000000000000"
 
 
@@ -47,7 +47,7 @@ class TokenReplenisher:
     async def _poll_and_replenish(self) -> None:
         metrics = self._chain_metrics
 
-        # ── AgentToken balances ─────────────────────────────────────────────
+        # ── AgentToken (sETH) balances + auto-replenishment ────────────────
         if self._agent_token:
             coordinator_agt = 0.0
             if _is_address(self._coordinator_address):
@@ -63,6 +63,18 @@ class TokenReplenisher:
                     )
                 else:
                     agent_data["agt_balance"] = coordinator_agt
+
+            if coordinator_agt < _TOPUP_THRESHOLD and _is_address(self._coordinator_address):
+                logger.warning(
+                    f"Coordinator AGT low ({coordinator_agt:.2f}) — minting {_TOPUP_AMOUNT:.0f}"
+                )
+                try:
+                    res = await self._agent_token.mint(
+                        self._deployer_pk, self._coordinator_address, _TOPUP_AMOUNT
+                    )
+                    logger.info(f"Coordinator AGT top-up tx: {res.get('tx_hash', '')[:16]}")
+                except Exception as e:
+                    logger.error(f"Coordinator AGT top-up failed: {e}")
 
         # ── QuoteToken balances + auto-replenishment ────────────────────────
         if not self._quote_token:

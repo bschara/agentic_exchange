@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
-contract Treasury {
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+
+contract Treasury is Initializable, UUPSUpgradeable {
     address public owner;
     mapping(address => uint256) public balances;
 
@@ -14,7 +17,12 @@ contract Treasury {
         _;
     }
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
+        _disableInitializers();
+    }
+
+    function initialize() external initializer {
         owner = msg.sender;
     }
 
@@ -48,6 +56,8 @@ contract Treasury {
         balances[to] += amount;
         emit Allocated(from, to, amount);
     }
+
+    function _authorizeUpgrade(address) internal override onlyOwner {}
 
     function getBalance(address agent) external view returns (uint256) {
         return balances[agent];
