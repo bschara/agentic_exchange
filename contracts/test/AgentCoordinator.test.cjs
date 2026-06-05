@@ -66,6 +66,12 @@ describe("AgentCoordinator", function () {
     await coordinator.approveToken(await token.getAddress(),      exchangeAddr, ethers.MaxUint256);
     await coordinator.approveToken(await quoteToken.getAddress(), exchangeAddr, ethers.MaxUint256);
 
+    // Allocate virtual balances so handleDecision can place orders
+    await coordinator.allocateToAgent(
+      AGENT_ID, owner.address,
+      ethers.parseEther("10000"), ethers.parseEther("10000")
+    );
+
     return { coordinator, registry, platform, exchange, token, quoteToken, owner, stranger };
   }
 
@@ -238,6 +244,10 @@ describe("AgentCoordinator", function () {
         MM, "MM-Prime", "⚖️", 3, "Market maker strategy.",
         PRICE_URL, PRICE_SELECTOR, 0
       );
+      await coordinator.allocateToAgent(
+        MM, owner.address,
+        ethers.parseEther("10000"), ethers.parseEther("10000")
+      );
 
       await coordinator.triggerAgentDecision(MM); // reqId=1
       await platform.simulatePriceCallback(1n, 3000n); // llmReqId=2
@@ -347,9 +357,11 @@ describe("AgentCoordinator", function () {
       await coordinator.approveToken(await token.getAddress(),      exchangeAddr, ethers.MaxUint256);
       await coordinator.approveToken(await quoteToken.getAddress(), exchangeAddr, ethers.MaxUint256);
 
-      // Register 3 directional agents via registry (no market_maker — it's non-directional)
+      // Register 3 directional agents and allocate virtual balances so lastDecision
+      // stays as BUY/SELL after order placement (not reset to HOLD on balance failure)
       for (const id of ["agent1", "agent2", "agent3"]) {
         await registry.registerAgent(id, id, "🤖", 3, "prompt", PRICE_URL, PRICE_SELECTOR, 0);
+        await coordinator.allocateToAgent(id, owner.address, ethers.parseEther("10000"), ethers.parseEther("10000"));
       }
       return { coordinator, registry, platform, exchange, token, owner };
     }

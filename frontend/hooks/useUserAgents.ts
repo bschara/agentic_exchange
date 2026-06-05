@@ -64,7 +64,7 @@ export function useUserAgents(walletAddress: string | null) {
       const data = await res.json();
       const records: UserAgentRecord[] = (data.agents || []).map((r: UserAgentRecord) => ({
         ...r,
-        metrics: liveAgents[r.agent_id] ?? undefined,
+        metrics: liveAgents[r.agent_id] ?? r.metrics,
       }));
       setAgents(records);
     } catch (e) {

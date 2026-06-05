@@ -77,6 +77,8 @@ async def send_transaction(
                 ),
                 timeout=35,
             )
+            if receipt.get('status') == 0:
+                raise Exception(f"Transaction reverted: {tx_hash.hex()}")
             logger.info(f"Tx confirmed: {tx_hash.hex()} block={receipt.blockNumber}")
             # Re-sync after confirmation — the daemon may have used this key
             # while we waited, advancing the chain nonce past our cached value.

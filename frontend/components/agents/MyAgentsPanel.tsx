@@ -22,10 +22,10 @@ export function MyAgentsPanel({ walletAddress }: Props) {
     setRefreshing(false);
   };
 
-  const handleModalClose = async () => {
+  const handleModalClose = () => {
     setShowModal(false);
-    // Poll for the new agent after a short delay (backend needs one cycle to detect the event)
-    setTimeout(refetch, 6000);
+    // Retry across 30s to cover the backend's 5s event-polling cycle
+    [3000, 8000, 15000, 25000].forEach((delay) => setTimeout(refetch, delay));
   };
 
   return (

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import random
 import time
 from pathlib import Path
 from typing import Optional
@@ -26,11 +25,11 @@ logger = logging.getLogger(__name__)
 _ZERO = "0x0000000000000000000000000000000000000000"
 
 AGENT_CONFIGS = [
-    {"id": "market_maker",    "pk_key": "market_maker_pk"},
-    {"id": "momentum_trader", "pk_key": "momentum_trader_pk"},
-    {"id": "arbitrage_agent", "pk_key": "arbitrage_agent_pk"},
-    {"id": "risk_manager",    "pk_key": "risk_manager_pk"},
-    {"id": "noise_trader",    "pk_key": "noise_trader_pk"},
+    {"id": "market_maker"},
+    {"id": "momentum_trader"},
+    {"id": "arbitrage_agent"},
+    {"id": "risk_manager"},
+    {"id": "noise_trader"},
 ]
 
 
@@ -56,20 +55,6 @@ def _load_local_deployment():
             settings.quote_token_address       = c.get("QuoteToken", {}).get("address", settings.quote_token_address)
             logger.info(f"Loaded contract addresses from {json_path.name}")
 
-        agents_data = dep.get("agents", {})
-        pk_map = {
-            "market_maker":    "market_maker_pk",
-            "momentum_trader": "momentum_trader_pk",
-            "arbitrage_agent": "arbitrage_agent_pk",
-            "risk_manager":    "risk_manager_pk",
-            "noise_trader":    "noise_trader_pk",
-        }
-        for agent_id, pk_key in pk_map.items():
-            pk = agents_data.get(agent_id, {}).get("pk", "")
-            current = getattr(settings, pk_key, "")
-            if pk and (is_local or not current or current == "0x" + "0" * 64):
-                setattr(settings, pk_key, pk)
-                logger.info(f"Loaded {agent_id} PK from {json_path.name}")
     except Exception as e:
         logger.warning(f"Could not load somnia-local.json: {e}")
 
@@ -114,26 +99,15 @@ class AgentOrchestrator:
         self._order_to_agent: dict[int, str] = {}
         self._chain_metrics: dict = self._build_initial_chain_metrics()
 
-        # Agent registry — wallet addresses needed for metrics + treasury polling
+        # All system agents operate through the coordinator pool — no individual wallets.
         self.agents: dict[str, dict] = {}
         for cfg in AGENT_CONFIGS:
-            pk = getattr(settings, cfg["pk_key"])
-            try:
-                wallet = Account.from_key(pk).address
-            except Exception:
-                wallet = _ZERO
-                logger.warning(f"Invalid private key for {cfg['id']} — wallet set to zero")
             self.agents[cfg["id"]] = {
-                "agent_id":       cfg["id"],
-                "agent_name":     cfg["id"],
-                "wallet_address": wallet,
+                "agent_id":   cfg["id"],
+                "agent_name": cfg["id"],
             }
-            if cfg["id"] in self._chain_metrics.get("agents", {}):
-                self._chain_metrics["agents"][cfg["id"]]["wallet_address"] = wallet
 
-        self._wallet_to_id: dict[str, str] = {
-            a["wallet_address"].lower(): a["agent_id"] for a in self.agents.values()
-        }
+        self._wallet_to_id: dict[str, str] = {}
 
         self._reload_user_agents_from_db()
 
@@ -162,15 +136,12 @@ class AgentOrchestrator:
             agent_token=self._agent_token,
             deployer_pk=settings.deployer_private_key,
             coordinator_address=settings.agent_coordinator_address,
-            agents=self.agents,
-            chain_metrics=self._chain_metrics,
         )
 
         # Task handles
         self._poll_task: Optional[asyncio.Task] = None
         self._snapshot_task: Optional[asyncio.Task] = None
         self._metrics_task: Optional[asyncio.Task] = None
-        self._noise_task: Optional[asyncio.Task] = None
         self._token_task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
 
@@ -203,12 +174,9 @@ class AgentOrchestrator:
         self._metrics_task  = asyncio.create_task(self._contract_metrics_poll_loop())
         self._token_task    = asyncio.create_task(self._token_replenisher.run())
 
-        if self._exchange:
-            self._noise_task = asyncio.create_task(self._noise_trader_loop())
-
         if self._coordinator:
             logger.info("Firing initial on-chain triggers (contract self-loops after this)...")
-            _on_chain = {"market_maker", "momentum_trader", "arbitrage_agent", "risk_manager"}
+            _on_chain = {"market_maker", "momentum_trader", "arbitrage_agent", "risk_manager", "noise_trader"}
 
             self._watchdog = AgentWatchdog(
                 coordinator=self._coordinator,
@@ -236,6 +204,13 @@ class AgentOrchestrator:
                 await asyncio.sleep(2.0)
 
             self._watchdog_task = asyncio.create_task(self._watchdog.run())
+
+            # Recover user agents loaded from DB that may not have been set up yet
+            for agent_id, info in list(self.agents.items()):
+                if info.get("is_user_agent") and info.get("owner_address"):
+                    asyncio.create_task(
+                        self._ensure_user_agent_setup(agent_id, info["owner_address"])
+                    )
         else:
             logger.info("No AgentCoordinator — running in observe-only mode.")
 
@@ -244,7 +219,7 @@ class AgentOrchestrator:
     async def stop_all(self):
         for task in [
             self._poll_task, self._snapshot_task, self._metrics_task,
-            self._noise_task, self._token_task, self._watchdog_task,
+            self._token_task, self._watchdog_task,
         ]:
             if task:
                 task.cancel()
@@ -296,45 +271,28 @@ class AgentOrchestrator:
             await asyncio.sleep(3.0)
 
     async def _contract_metrics_poll_loop(self):
-        from_block = await self._metrics_collector.get_start_block()
-        logger.info(f"Contract metrics poll starting from block {from_block}")
+        from_block = 0  # start from genesis to catch all historical events on every restart
+        logger.info("Contract metrics poll starting from block 0 (full history scan)")
         while True:
             try:
-                from_block = await self._metrics_collector.collect(from_block)
+                # Detect new agents BEFORE collect() so their metrics are populated
+                # before historical DecisionExecuted events are processed.
                 if self._registry:
-                    for ev in await self._registry.get_agent_registered_events(
-                        from_block - 1 if from_block > 0 else 0
-                    ):
-                        agent_id = ev["agentId"]
+                    for agent_id in await self._registry.get_all_agent_ids():
                         if agent_id not in self.agents:
-                            await self._on_user_agent_registered(
-                                agent_id, ev["agentOwner"], ev["name"],
-                                ev["icon"], ev["riskLevel"],
-                            )
+                            info = await self._registry.get_agent(agent_id)
+                            if info and info.get("agentOwner"):
+                                await self._on_user_agent_registered(
+                                    agent_id,
+                                    info["agentOwner"],
+                                    info.get("name", agent_id),
+                                    info.get("icon", "🤖"),
+                                    int(info.get("riskLevel", 3)),
+                                )
+                from_block = await self._metrics_collector.collect(from_block)
             except Exception as e:
                 logger.error(f"Contract metrics poll error: {e}")
             await asyncio.sleep(5.0)
-
-    async def _noise_trader_loop(self):
-        noise_pk = getattr(settings, "noise_trader_pk", "")
-        logger.info("Noise trader loop started")
-        while True:
-            try:
-                ref_price = self._price_tracker.price
-                if ref_price > 0 and self._exchange:
-                    is_buy = random.choice([True, False])
-                    slippage = random.uniform(-0.005, 0.005)
-                    price = ref_price * (1 + slippage)
-                    amount = round(random.uniform(0.03, 0.08), 3)
-                    result = await self._exchange.place_order(noise_pk, is_buy, price, amount)
-                    side = "BUY" if is_buy else "SELL"
-                    logger.debug(
-                        f"Noise trader: {side} {amount} @ ${price:.2f} "
-                        f"tx={result.get('tx_hash', '')[:12]}"
-                    )
-            except Exception as e:
-                logger.debug(f"Noise trader order failed: {e}")
-            await asyncio.sleep(random.uniform(4.0, 6.0))
 
     # ── User agent support ────────────────────────────────────────────────────
 
@@ -361,6 +319,53 @@ class AgentOrchestrator:
         except Exception as e:
             logger.warning(f"_reload_user_agents_from_db failed: {e}")
 
+    async def _ensure_user_agent_setup(self, agent_id: str, owner: str) -> None:
+        """Allocate capital, fund STT, and fire a trigger for a user agent if not yet done."""
+        if not self._coordinator:
+            return
+        try:
+            token_bal, _ = await self._coordinator.get_agent_allocation(agent_id)
+        except Exception:
+            token_bal = 0.0
+
+        if token_bal == 0.0:
+            try:
+                await self._coordinator.allocate_to_agent(
+                    settings.deployer_private_key,
+                    agent_id,
+                    owner,
+                    token_amount=1000.0,
+                    quote_amount=1000.0,
+                )
+                logger.info(f"User agent {agent_id} allocated 1000 sETH / 1000 USDC")
+            except Exception as e:
+                logger.error(f"allocateToAgent failed for {agent_id}: {e}")
+                if self._watchdog:
+                    self._watchdog.mark_seen(agent_id)
+                return  # watchdog will retry with allocation check every 45s
+
+        try:
+            stt = await self._coordinator.get_user_stt_balance(owner)
+            if stt < 0.05:
+                await self._coordinator.deposit_stt_for_owner(
+                    settings.deployer_private_key, owner, amount_eth=0.1
+                )
+                logger.info(f"User agent {agent_id}: deposited 0.1 STT for owner {owner}")
+        except Exception as e:
+            logger.error(f"depositStt failed for {agent_id}: {e}")
+
+        try:
+            result = await self._coordinator.trigger_decision(
+                agent_pk=settings.deployer_private_key,
+                agent_id=agent_id,
+            )
+            logger.info(f"User agent {agent_id} triggered: {result.get('tx_hash', '')[:16]}")
+        except Exception as e:
+            logger.error(f"trigger_decision failed for {agent_id}: {e}")
+        finally:
+            if self._watchdog:
+                self._watchdog.mark_seen(agent_id)
+
     async def _on_user_agent_registered(
         self, agent_id: str, owner: str, name: str, icon: str = "🤖", risk_level: int = 3
     ) -> None:
@@ -386,15 +391,4 @@ class AgentOrchestrator:
             self._chain_metrics["agents"][agent_id] = entry
 
         logger.info(f"User agent registered: {agent_id} (owner={owner})")
-
-        if self._coordinator:
-            try:
-                result = await self._coordinator.trigger_decision(
-                    agent_pk=settings.deployer_private_key,
-                    agent_id=agent_id,
-                )
-                if self._watchdog:
-                    self._watchdog.mark_seen(agent_id)
-                logger.info(f"User agent {agent_id} initial trigger tx={result.get('tx_hash', '')[:16]}")
-            except Exception as e:
-                logger.error(f"User agent {agent_id} initial trigger failed: {e}")
+        await self._ensure_user_agent_setup(agent_id, owner)

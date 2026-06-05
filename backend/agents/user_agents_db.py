@@ -93,5 +93,5 @@ class UserAgentsDB:
 
     def _write(self, agents: list[dict]) -> None:
         tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(agents, indent=2))
+        tmp.write_text(json.dumps(agents, indent=2, ensure_ascii=False))
         os.replace(tmp, self._path)

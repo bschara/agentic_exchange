@@ -3,9 +3,10 @@
 import { AgentStatus } from '@/lib/types';
 
 const STATUS_CONFIG: Record<AgentStatus, { dot: string; text: string; label: string }> = {
-  ACTIVE:  { dot: 'bg-emerald-400 animate-pulse', text: 'text-emerald-400', label: 'ACTIVE' },
-  WAITING: { dot: 'bg-gray-500',                  text: 'text-gray-500',    label: 'WAITING' },
-  STOPPED: { dot: 'bg-red-500',                   text: 'text-red-400',     label: 'STOPPED' },
+  ACTIVE:   { dot: 'bg-emerald-400 animate-pulse', text: 'text-emerald-400', label: 'ACTIVE' },
+  STARTING: { dot: 'bg-yellow-400 animate-pulse',  text: 'text-yellow-400',  label: 'STARTING' },
+  WAITING:  { dot: 'bg-gray-500',                  text: 'text-gray-500',    label: 'WAITING' },
+  STOPPED:  { dot: 'bg-red-500',                   text: 'text-red-400',     label: 'STOPPED' },
 };
 
 export function AgentStatusBadge({ status }: { status: AgentStatus }) {

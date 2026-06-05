@@ -13,14 +13,9 @@ class Settings(BaseSettings):
     somnia_rpc_url: str = "https://dream-rpc.somnia.network"
     somnia_chain_id: int = 50312
 
-    # Agent wallets — must be set via .env (no usable defaults)
-    # On localhost these are auto-loaded from somnia-local.json at startup.
+    # Deployer key — the single key used for all on-chain actions.
+    # On localhost auto-loaded from somnia-local.json at startup.
     deployer_private_key: str = ""
-    market_maker_pk: str = ""
-    momentum_trader_pk: str = ""
-    arbitrage_agent_pk: str = ""
-    risk_manager_pk: str = ""
-    noise_trader_pk: str = ""
 
     # Contract addresses — auto-loaded from somnia-local.json on localhost;
     # must be set via .env for testnet (printed by deploy.js)
@@ -62,11 +57,6 @@ def validate_settings() -> None:
 
     pk_fields = {
         "DEPLOYER_PRIVATE_KEY": settings.deployer_private_key,
-        "MARKET_MAKER_PK":      settings.market_maker_pk,
-        "MOMENTUM_TRADER_PK":   settings.momentum_trader_pk,
-        "ARBITRAGE_AGENT_PK":   settings.arbitrage_agent_pk,
-        "RISK_MANAGER_PK":      settings.risk_manager_pk,
-        "NOISE_TRADER_PK":      settings.noise_trader_pk,
     }
 
     errors: list[str] = []

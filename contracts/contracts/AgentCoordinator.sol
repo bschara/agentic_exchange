@@ -55,11 +55,14 @@ interface IERC20Approvable {
 
 interface IExchange {
     function placeOrder(bool isBuy, uint256 price, uint256 amount) external returns (uint256 orderId);
+    function placeOrderForAgent(bool isBuy, uint256 price, uint256 amount, string calldata agentId) external returns (uint256 orderId);
     function cancelOrder(uint256 orderId) external;
     function getLastTradePrice() external view returns (uint256);
     function hasTraded() external view returns (bool);
     function getBestBid() external view returns (uint256 price, bool exists);
     function getBestAsk() external view returns (uint256 price, bool exists);
+    function getActiveBuys() external view returns (uint256[] memory);
+    function getActiveSells() external view returns (uint256[] memory);
 }
 
 // AgentRegistry view interface — coordinator reads config from registry at runtime
@@ -140,12 +143,24 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
     // Tracks the last BID order for market_maker (lastOrderId only tracks the ASK side)
     mapping(string => uint256) public lastBidOrderId;
 
+    // Per-agent virtual balances within the shared coordinator pool (18 decimals)
+    // Set at registration; deltas applied off-chain from Exchange TradeExecuted events
+    mapping(string => uint256) public agentTokenBalance;
+    mapping(string => uint256) public agentQuoteBalance;
+
+    // Per-user STT balance — all agents owned by the same address share one pool
+    mapping(address => uint256) public userSttBalance;
+    // Cached owner per agentId — set in allocateToAgent, read on every platform call
+    mapping(string => address) public agentOwner;
+
     string[] private _allowedValues;
 
     // ── Events ───────────────────────────────────────────────────────────────────
 
     event AgentPaused(string agentId);
     event AgentResumed(string agentId);
+    event AgentCapitalAllocated(string indexed agentId, uint256 tokenAmount, uint256 quoteAmount);
+    event SttDeposited(address indexed owner, uint256 amount);
     event DecisionTriggered(uint256 indexed requestId, string agentId);
     event PriceFetchFailed(uint256 indexed requestId, string agentId);
 
@@ -241,7 +256,80 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
         jsonApiAgentId = agentId;
     }
 
-    function fund() external payable {}
+    // Deposit STT for the caller's own agent pool (called by users via the frontend).
+    function fund() external payable {
+        userSttBalance[msg.sender] += msg.value;
+        emit SttDeposited(msg.sender, msg.value);
+    }
+
+    // Deposit STT on behalf of another address (used by deployer for system agents / top-ups).
+    function depositStt(address forOwner) external payable {
+        userSttBalance[forOwner] += msg.value;
+        emit SttDeposited(forOwner, msg.value);
+    }
+
+    function getUserSttBalance(address agentOwnerAddr) external view returns (uint256) {
+        return userSttBalance[agentOwnerAddr];
+    }
+
+    // Set the initial virtual capital allocation for an agent within the shared pool.
+    // Also caches the owner for per-user STT deduction on each platform call.
+    // Called by the backend once when an agent is registered.
+    function allocateToAgent(
+        string calldata agentId,
+        address agentOwnerAddr,
+        uint256 tokenAmount,
+        uint256 quoteAmount
+    ) external onlyOwner {
+        require(IAgentRegistry(registry).isRegistered(agentId), "Agent not registered");
+        agentTokenBalance[agentId] = tokenAmount;
+        agentQuoteBalance[agentId] = quoteAmount;
+        agentOwner[agentId] = agentOwnerAddr;
+        emit AgentCapitalAllocated(agentId, tokenAmount, quoteAmount);
+    }
+
+    // Returns both virtual balances for an agent in one call.
+    function getAgentAllocation(string calldata agentId)
+        external view returns (uint256 tokenBalance, uint256 quoteBalance)
+    {
+        return (agentTokenBalance[agentId], agentQuoteBalance[agentId]);
+    }
+
+    // ── Fill/cancel callbacks from Exchange ───────────────────────────────────
+    // Called by Exchange after each partial or full fill for orders placed via
+    // placeOrderForAgent. Updates the agent's virtual balance within the shared pool.
+
+    function onAgentFill(
+        string calldata agentId,
+        bool isBuy,
+        uint256 tokenFill,
+        uint256 quoteFill
+    ) external {
+        require(msg.sender == address(exchange), "Only exchange");
+        if (isBuy) {
+            // Buyer received sETH; quote was already deducted at order placement
+            agentTokenBalance[agentId] += tokenFill;
+        } else {
+            // Seller received exact USDC amount computed by Exchange; token was already deducted
+            agentQuoteBalance[agentId] += quoteFill;
+        }
+    }
+
+    function onAgentCancel(
+        string calldata agentId,
+        bool isBuy,
+        uint256 unfilledTokens,
+        uint256 remainingQuote
+    ) external {
+        require(msg.sender == address(exchange), "Only exchange");
+        if (isBuy) {
+            // Unfilled quote is being refunded to coordinator; restore agent's virtual quote
+            agentQuoteBalance[agentId] += remainingQuote;
+        } else {
+            // Unfilled sETH is being refunded to coordinator; restore agent's virtual token balance
+            agentTokenBalance[agentId] += unfilledTokens;
+        }
+    }
 
     function approveToken(address _token, address spender, uint256 amount) external onlyOwner {
         IERC20Approvable(_token).approve(spender, amount);
@@ -257,10 +345,15 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
     // Reads price config from registry, fires Somnia JSON API price fetch.
     //
     function triggerAgentDecision(string calldata agentId) external onlyOwner {
+        require(!agentPaused[agentId], "Agent is paused");
         require(IAgentRegistry(registry).isRegistered(agentId), "Agent not registered");
 
         uint256 deposit = platform.getRequestDeposit();
-        require(address(this).balance >= deposit * 2, "Coordinator underfunded: need 2 deposits");
+        address agentOwnerAddr = agentOwner[agentId];
+        // Reserve 2 deposits up front: 1 for JSON API, 1 for the LLM call that follows.
+        // Rule-based agents (empty prompt) only use 1, but the check is conservative.
+        require(userSttBalance[agentOwnerAddr] >= deposit * 2, "Insufficient STT balance");
+        userSttBalance[agentOwnerAddr] -= deposit;
 
         (string memory priceUrl, string memory selector, uint8 decimals) =
             IAgentRegistry(registry).getPriceConfig(agentId);
@@ -285,9 +378,12 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
 
     // ── Step 1b (optional): Backend injects price directly, skipping JSON API ────
     function triggerWithPrice(string calldata agentId, uint256 rawPrice) external onlyOwner {
+        require(!agentPaused[agentId], "Agent is paused");
         require(IAgentRegistry(registry).isRegistered(agentId), "Agent not registered");
         uint256 deposit = platform.getRequestDeposit();
-        require(address(this).balance >= deposit, "Coordinator underfunded");
+        address agentOwnerAddr = agentOwner[agentId];
+        require(userSttBalance[agentOwnerAddr] >= deposit, "Insufficient STT balance");
+        userSttBalance[agentOwnerAddr] -= deposit;
         _fireLLMRequest(agentId, rawPrice);
         emit DecisionTriggered(0, agentId);
     }
@@ -311,18 +407,23 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
         }
 
         uint256 fetchedPrice = abi.decode(responses[0].result, (uint256));
+
+        // Empty systemPrompt = rule-based agent (e.g. noise_trader); skip LLM entirely.
+        if (bytes(IAgentRegistry(registry).getSystemPrompt(req.agentId)).length == 0) {
+            _executeRuleDecision(req.agentId, fetchedPrice);
+            return;
+        }
         _fireLLMRequest(req.agentId, fetchedPrice);
     }
 
     // ── Internal: fire LLM inference request with a known price ─────────────────
     function _fireLLMRequest(string memory agentId, uint256 fetchedPrice) internal {
+        // Deduct the LLM deposit from the agent's owner STT balance.
+        uint256 deposit = platform.getRequestDeposit();
+        userSttBalance[agentOwner[agentId]] -= deposit;
+
         string memory context   = _buildContext(fetchedPrice, agentId);
         string memory sysPrompt = IAgentRegistry(registry).getSystemPrompt(agentId);
-
-        // Fallback if registry has no prompt (shouldn't happen after registration)
-        if (bytes(sysPrompt).length == 0) {
-            sysPrompt = "You are an autonomous trading agent. Respond with exactly one word: BUY, SELL, or HOLD.";
-        }
 
         bytes memory llmPayload = abi.encodeWithSelector(
             ILLMAgent.inferString.selector,
@@ -385,14 +486,27 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
         if (_strEq(req.agentId, "market_maker")) {
             uint256 bidPrice = basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
             uint256 askPrice = basePrice * (10000 + PRICE_OFFSET_BPS) / 10000;
-            try exchange.placeOrder(true,  bidPrice, ORDER_AMOUNT_BASE) returns (uint256 bidId) {
-                lastBidOrderId[req.agentId] = bidId;
-                emit DecisionExecuted(requestId, req.agentId, "BUY",  bidPrice, bidId, 0);
-            } catch {}
-            try exchange.placeOrder(false, askPrice, ORDER_AMOUNT_BASE) returns (uint256 askId) {
-                lastOrderId[req.agentId] = askId;
-                emit DecisionExecuted(requestId, req.agentId, "SELL", askPrice, askId, 0);
-            } catch {}
+            uint256 bidQuote = bidPrice * ORDER_AMOUNT_BASE / 1e18;
+            // Deduct virtual quote for the BUY side before placing
+            if (agentQuoteBalance[req.agentId] >= bidQuote) {
+                agentQuoteBalance[req.agentId] -= bidQuote;
+                try exchange.placeOrderForAgent(true, bidPrice, ORDER_AMOUNT_BASE, req.agentId) returns (uint256 bidId) {
+                    lastBidOrderId[req.agentId] = bidId;
+                    emit DecisionExecuted(requestId, req.agentId, "BUY", bidPrice, bidId, 0);
+                } catch {
+                    agentQuoteBalance[req.agentId] += bidQuote; // restore on failure
+                }
+            }
+            // Deduct virtual token for the SELL side before placing
+            if (agentTokenBalance[req.agentId] >= ORDER_AMOUNT_BASE) {
+                agentTokenBalance[req.agentId] -= ORDER_AMOUNT_BASE;
+                try exchange.placeOrderForAgent(false, askPrice, ORDER_AMOUNT_BASE, req.agentId) returns (uint256 askId) {
+                    lastOrderId[req.agentId] = askId;
+                    emit DecisionExecuted(requestId, req.agentId, "SELL", askPrice, askId, 0);
+                } catch {
+                    agentTokenBalance[req.agentId] += ORDER_AMOUNT_BASE; // restore on failure
+                }
+            }
             _retrigger(req.agentId);
             return;
         }
@@ -421,11 +535,36 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
             ? basePrice * (10000 + PRICE_OFFSET_BPS) / 10000
             : basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
 
-        try exchange.placeOrder(isBuy, orderPrice, _orderAmount(req.agentId)) returns (uint256 orderId) {
+        uint256 orderAmt = _orderAmount(req.agentId);
+        bool canPlace;
+        if (isBuy) {
+            uint256 quoteNeeded = orderPrice * orderAmt / 1e18;
+            canPlace = agentQuoteBalance[req.agentId] >= quoteNeeded;
+            if (canPlace) agentQuoteBalance[req.agentId] -= quoteNeeded;
+        } else {
+            canPlace = agentTokenBalance[req.agentId] >= orderAmt;
+            if (canPlace) agentTokenBalance[req.agentId] -= orderAmt;
+        }
+
+        if (!canPlace) {
+            lastDecision[req.agentId] = "HOLD"; // don't broadcast blocked decision to peers
+            winStreak[req.agentId] = 0;
+            emit DecisionFailed(requestId, req.agentId, "Insufficient virtual balance");
+            _retrigger(req.agentId);
+            return;
+        }
+
+        try exchange.placeOrderForAgent(isBuy, orderPrice, orderAmt, req.agentId) returns (uint256 orderId) {
             winStreak[req.agentId]++;
             lastOrderId[req.agentId] = orderId;
             emit DecisionExecuted(requestId, req.agentId, decision, orderPrice, orderId, winStreak[req.agentId]);
         } catch {
+            // Restore virtual balance if exchange rejected the order
+            if (isBuy) {
+                agentQuoteBalance[req.agentId] += orderPrice * orderAmt / 1e18;
+            } else {
+                agentTokenBalance[req.agentId] += orderAmt;
+            }
             winStreak[req.agentId] = 0;
             emit DecisionFailed(requestId, req.agentId, "placeOrder reverted");
         }
@@ -433,23 +572,89 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
         _retrigger(req.agentId);
     }
 
+    // ── Rule-based decision (no LLM) — order-book balance ───────────────────────
+    //
+    // Counterbalances the market: buy when asks > bids (others selling),
+    // sell when bids > asks (others buying), random when balanced.
+    // This ensures the noise bot always provides liquidity to the thin side.
+    //
+    function _executeRuleDecision(string memory agentId, uint256 fetchedPrice) internal {
+        bool isBuy;
+        uint256 buyDepth  = exchange.getActiveBuys().length;
+        uint256 sellDepth = exchange.getActiveSells().length;
+        if (sellDepth > buyDepth) {
+            isBuy = true;   // more asks than bids — provide buy side
+        } else if (buyDepth > sellDepth) {
+            isBuy = false;  // more bids than asks — provide sell side
+        } else {
+            isBuy = block.prevrandao % 2 == 0;  // balanced — random
+        }
+
+        // Use last trade price when available; fall back to oracle on cold start
+        (, , uint8 decimals) = IAgentRegistry(registry).getPriceConfig(agentId);
+        uint256 basePrice = exchange.hasTraded()
+            ? exchange.getLastTradePrice()
+            : _toWei(fetchedPrice, decimals);
+        uint256 orderPrice = isBuy
+            ? basePrice * (10000 + PRICE_OFFSET_BPS) / 10000
+            : basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
+
+        // Scale order size with imbalance so noise bot absorbs directional pressure faster
+        uint256 imbalance = sellDepth > buyDepth ? sellDepth - buyDepth : buyDepth - sellDepth;
+        uint256 orderAmt  = _orderAmount(agentId);
+        if (imbalance > 1) orderAmt = orderAmt * imbalance;
+        if (orderAmt > ORDER_AMOUNT_MAX * 5) orderAmt = ORDER_AMOUNT_MAX * 5;
+
+        // Cancel stale order from previous cycle
+        uint256 prev = lastOrderId[agentId];
+        if (prev > 0) { try exchange.cancelOrder(prev) {} catch {} lastOrderId[agentId] = 0; }
+        uint256 prevBid = lastBidOrderId[agentId];
+        if (prevBid > 0) { try exchange.cancelOrder(prevBid) {} catch {} lastBidOrderId[agentId] = 0; }
+
+        if (isBuy) {
+            uint256 q = orderPrice * orderAmt / 1e18;
+            if (agentQuoteBalance[agentId] >= q) {
+                agentQuoteBalance[agentId] -= q;
+                try exchange.placeOrderForAgent(true, orderPrice, orderAmt, agentId) returns (uint256 oid) {
+                    lastOrderId[agentId] = oid;
+                    lastDecision[agentId] = "BUY";
+                    emit DecisionExecuted(0, agentId, "BUY", orderPrice, oid, winStreak[agentId]);
+                } catch { agentQuoteBalance[agentId] += q; }
+            }
+        } else {
+            if (agentTokenBalance[agentId] >= orderAmt) {
+                agentTokenBalance[agentId] -= orderAmt;
+                try exchange.placeOrderForAgent(false, orderPrice, orderAmt, agentId) returns (uint256 oid) {
+                    lastOrderId[agentId] = oid;
+                    lastDecision[agentId] = "SELL";
+                    emit DecisionExecuted(0, agentId, "SELL", orderPrice, oid, winStreak[agentId]);
+                } catch { agentTokenBalance[agentId] += orderAmt; }
+            }
+        }
+
+        _retrigger(agentId);
+    }
+
     // ── Self-re-trigger ───────────────────────────────────────────────────────────
     function _retrigger(string memory agentId) internal {
         if (agentPaused[agentId]) {
-            emit LoopStopped(agentId, "paused", address(this).balance);
+            emit LoopStopped(agentId, "paused", userSttBalance[agentOwner[agentId]]);
             return;
         }
 
         if (!IAgentRegistry(registry).isRegistered(agentId)) {
-            emit LoopStopped(agentId, "No agent config", address(this).balance);
+            emit LoopStopped(agentId, "No agent config", userSttBalance[agentOwner[agentId]]);
             return;
         }
 
-        uint256 needed = platform.getRequestDeposit() * 2;
-        if (address(this).balance < needed) {
-            emit LoopStopped(agentId, "Insufficient balance", address(this).balance);
+        address agentOwnerAddr = agentOwner[agentId];
+        uint256 deposit = platform.getRequestDeposit();
+        // Reserve 2 deposits: 1 for this JSON API call, 1 for the LLM call that follows.
+        if (userSttBalance[agentOwnerAddr] < deposit * 2) {
+            emit LoopStopped(agentId, "Insufficient STT", userSttBalance[agentOwnerAddr]);
             return;
         }
+        userSttBalance[agentOwnerAddr] -= deposit;
 
         (string memory priceUrl, string memory selector, uint8 decimals) =
             IAgentRegistry(registry).getPriceConfig(agentId);
@@ -460,7 +665,7 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
             selector,
             decimals
         );
-        uint256 newReqId = platform.createRequest{value: platform.getRequestDeposit()}(
+        uint256 newReqId = platform.createRequest{value: deposit}(
             jsonApiAgentId,
             address(this),
             this.handlePriceData.selector,
@@ -515,6 +720,7 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
         uint256 price = isBuy
             ? basePrice * (10000 + PRICE_OFFSET_BPS) / 10000
             : basePrice * (10000 - PRICE_OFFSET_BPS) / 10000;
+        // Coalition orders are placed on behalf of the coordinator itself (no per-agent id)
         try exchange.placeOrder(isBuy, price, coalitionAmt) returns (uint256 orderId) {
             emit CoalitionFormed(isBuy ? "BUY" : "SELL", 3, price, orderId);
         } catch {}
@@ -538,11 +744,15 @@ contract AgentCoordinator is Initializable, UUPSUpgradeable {
             ? string(abi.encodePacked(_uint2str(streak), "-win streak. "))
             : "";
 
+        uint256 buyDepth  = exchange.getActiveBuys().length;
+        uint256 sellDepth = exchange.getActiveSells().length;
+
         string memory part1 = string(abi.encodePacked(
             "ETH oracle: $", _uint2str(priceUsd),
             ". sETH last trade: $", _uint2str(lastFillUsd),
             ". Bid: $", bidOk ? _uint2str(bidUsd) : "none",
-            ". Ask: $", askOk ? _uint2str(askUsd) : "none"
+            ". Ask: $", askOk ? _uint2str(askUsd) : "none",
+            ". Book: ", _uint2str(buyDepth), " buys, ", _uint2str(sellDepth), " asks"
         ));
         string memory part2 = string(abi.encodePacked(
             ". Peers: ", _buildPeerSignals(agentId),

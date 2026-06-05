@@ -369,6 +369,44 @@ class AgentCoordinatorContract(_BaseContract):
         )
         return float(Web3.from_wei(wei, "ether"))
 
+    async def get_agent_allocation(self, agent_id: str) -> tuple[float, float]:
+        """Returns (token_balance, quote_balance) in token units for an agent."""
+        result = await self._call(
+            lambda: self._contract.functions.getAgentAllocation(agent_id).call(),
+            default=(0, 0), name=f"AgentCoordinator.getAgentAllocation({agent_id})",
+        )
+        return float(result[0]) / 1e18, float(result[1]) / 1e18
+
+    async def allocate_to_agent(
+        self,
+        deployer_pk: str,
+        agent_id: str,
+        owner: str,
+        token_amount: float = 1000.0,
+        quote_amount: float = 1000.0,
+    ) -> dict:
+        """Set virtual sETH/USDC allocation and cache owner for STT deduction."""
+        token_wei = int(token_amount * 1e18)
+        quote_wei = int(quote_amount * 1e18)
+        tx_hash = await self._tx(deployer_pk, "allocateToAgent", [agent_id, owner, token_wei, quote_wei])
+        return {"tx_hash": tx_hash, "agent_id": agent_id}
+
+    async def get_user_stt_balance(self, owner: str) -> float:
+        """Return the prepaid STT balance for a user wallet (in STT, not wei)."""
+        raw = await self._call(
+            lambda: self._contract.functions.getUserSttBalance(owner).call(),
+            default=0, name="AgentCoordinator.getUserSttBalance",
+        )
+        return float(Web3.from_wei(raw, "ether"))
+
+    async def deposit_stt_for_owner(
+        self, deployer_pk: str, owner: str, amount_eth: float = 0.1
+    ) -> dict:
+        """Deposit STT (native ETH) into the coordinator on behalf of a user wallet."""
+        value_wei = int(amount_eth * 1e18)
+        tx_hash = await self._tx(deployer_pk, "depositStt", [owner], value=value_wei)
+        return {"tx_hash": tx_hash, "owner": owner, "amount_eth": amount_eth}
+
     async def pause_agent(self, deployer_pk: str, agent_id: str) -> dict:
         """Halt the on-chain self-retrigger loop for an agent."""
         tx_hash = await self._tx(deployer_pk, "pauseAgent", [agent_id])

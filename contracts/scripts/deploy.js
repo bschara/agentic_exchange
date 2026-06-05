@@ -100,7 +100,7 @@ async function main() {
   const AGENT_META = {
     market_maker:    { name: 'MM-Prime',       icon: '⚖️', riskLevel: 3,
       prompt: 'You are MM-Prime, an autonomous market maker on the Somnia blockchain. ' +
-        'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+        'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
         'Goal: profit from the bid-ask spread by always providing liquidity on both sides. ' +
         'BUY if best ask exists and ask price is at or above reference price (capture sell-side spread). ' +
         'SELL if best bid exists and bid price is at or below reference price (capture buy-side spread). ' +
@@ -108,46 +108,53 @@ async function main() {
         'Respond with exactly one word: BUY or SELL.' },
     momentum_trader: { name: 'Momentum-Alpha', icon: '📈', riskLevel: 4,
       prompt: 'You are Momentum-Alpha, an autonomous momentum trader on the Somnia blockchain. ' +
-        'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+        'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
         'Goal: ride price trends for directional profit. ' +
         'BUY if ETH reference price is higher than or equal to the on-chain last trade price (upward momentum). ' +
         'SELL if ETH reference price is lower than the on-chain last trade price (downward momentum). ' +
+        'Use Book counts to gauge conviction: a heavily one-sided book suggests the trend may reverse. ' +
         'Respond with exactly one word: BUY or SELL.' },
     arbitrage_agent: { name: 'Arb-Scanner',    icon: '🔍', riskLevel: 3,
       prompt: 'You are Arb-Scanner, an autonomous arbitrage agent on the Somnia blockchain. ' +
-        'You receive: ETH reference price (from CoinGecko), on-chain last trade price, best bid, best ask. ' +
+        'You receive: ETH reference price (from CoinGecko), on-chain last trade price, best bid, best ask, and Book order counts. ' +
         'Goal: exploit price gaps between the reference market and the on-chain exchange. ' +
         'BUY if the on-chain last trade price is below the ETH reference price (on-chain underpriced). ' +
         'SELL if the on-chain last trade price is above or equal to the ETH reference price (on-chain overpriced or at parity). ' +
+        'The arb signal takes priority — keep the on-chain price close to the oracle. ' +
         'Respond with exactly one word: BUY or SELL.' },
     risk_manager:    { name: 'Risk-Shield',    icon: '🛡️', riskLevel: 2,
       prompt: 'You are Risk-Shield, an autonomous risk management agent on the Somnia blockchain. ' +
-        'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+        'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
         'Goal: maintain market stability by providing liquidity and hedging risk. ' +
         'BUY if there is no best bid, or if the on-chain last trade price is more than $5 below ETH reference (support the market). ' +
         'SELL if there is no best ask, or if the on-chain last trade price is more than $5 above ETH reference (resist the spike). ' +
         'If both conditions are neutral, BUY if last trade is below reference, SELL if above. ' +
         'Respond with exactly one word: BUY or SELL.' },
-    noise_trader:    { name: 'Noise-Bot',      icon: '🎲', riskLevel: 1,
-      prompt: 'You are Noise-Bot, a random noise trading agent on the Somnia blockchain. ' +
-        'Your goal is to keep the market active with unpredictable orders. ' +
-        'If the ETH reference price ends in an even digit, BUY. If odd, SELL. ' +
-        'Respond with exactly one word: BUY or SELL.' },
+    // Empty prompt = rule-based agent: coordinator routes to _executeRuleDecision
+    // (order-book balance) instead of LLM inference. No STT spent on LLM per cycle.
+    noise_trader:    { name: 'Noise-Bot',      icon: '🎲', riskLevel: 1, prompt: '' },
   };
 
-  console.log('\n─── Registering system agents via AgentRegistry ───');
+  // Wire registry into coordinator BEFORE registering agents —
+  // registerAgent() calls coordinator.addAgentToList() which requires onlyOwnerOrRegistry.
+  await (await coordinator.setRegistry(registryAddr)).wait();
+  console.log('coordinator.setRegistry() done');
+
+  console.log('\n─── Registering system agents and allocating virtual capital ───');
   for (const [id, meta] of Object.entries(AGENT_META)) {
     const tx = await registry.registerAgent(
       id, meta.name, meta.icon, meta.riskLevel,
       meta.prompt, COINGECKO_ETH_URL, COINGECKO_SELECTOR, PRICE_DECIMALS
     );
     await tx.wait();
-    console.log(`  ${id}: registered (icon=${meta.icon}, risk=${meta.riskLevel})`);
+    await (await coordinator.allocateToAgent(
+      id, deployer.address,
+      hre.ethers.parseEther('10000'),
+      hre.ethers.parseEther('10000')
+    )).wait();
+    const tag = id === 'noise_trader' ? 'rule-based' : 'prompt set';
+    console.log(`  ${id}: registered + 10K/10K allocated (${tag})`);
   }
-
-  // Wire registry into coordinator so registry can call onlyOwnerOrRegistry functions
-  await (await coordinator.setRegistry(registryAddr)).wait();
-  console.log('coordinator.setRegistry() done');
 
   // Fund AgentCoordinator — needs 2 deposits per decision cycle (JSON API + LLM)
   // 0.2 STT covers ~many cycles across 4 agents
@@ -165,18 +172,11 @@ async function main() {
   await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
   console.log('AgentCoordinator approved Exchange for sETH');
 
-  // Mint 10K QUOTE to coordinator (for BUY orders)
-  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('10000'))).wait();
-  console.log('Minted 10K QUOTE to AgentCoordinator');
+  // Mint 50K QUOTE to coordinator (5 agents × 10K each)
+  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('50000'))).wait();
+  console.log('Minted 50K QUOTE to AgentCoordinator');
   await (await coordinator.approveToken(quoteTokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
   console.log('AgentCoordinator approved Exchange for QUOTE');
-
-  // Mint 10M QUOTE to noise_trader wallet if address provided via env
-  const noiseTraderAddr = process.env.NOISE_TRADER_ADDRESS || '';
-  if (noiseTraderAddr && hre.ethers.isAddress(noiseTraderAddr)) {
-    await (await quoteToken.mint(noiseTraderAddr, hre.ethers.parseEther('10000'))).wait();
-    console.log(`Minted 10K QUOTE to noise_trader (${noiseTraderAddr})`);
-  }
 
   // Read ABIs from artifacts
   const tokenArtifact       = await hre.artifacts.readArtifact('AgentToken');

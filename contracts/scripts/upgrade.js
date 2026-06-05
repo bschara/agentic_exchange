@@ -60,14 +60,14 @@ async function main() {
 
   if (upgradeCoordinator) {
     if (!coordinatorProxyAddr) throw new Error('AgentCoordinator proxy address not found in deployment JSON');
-    if (!platformAddr || !exchangeAddr) throw new Error('Platform or Exchange address missing');
+    if (!platformAddr || !exchangeProxyAddr) throw new Error('Platform or Exchange address missing');
 
     console.log('\n─── Upgrading AgentCoordinator ──────────────────────────────');
     const AgentCoordinator = await hre.ethers.getContractFactory('AgentCoordinator');
     const upgraded = await hre.upgrades.upgradeProxy(
       coordinatorProxyAddr,
       AgentCoordinator,
-      { kind: 'uups', constructorArgs: [platformAddr, exchangeAddr] }
+      { kind: 'uups', constructorArgs: [platformAddr, exchangeProxyAddr] }
     );
     await upgraded.waitForDeployment();
     console.log('AgentCoordinator upgraded. Proxy address unchanged:', coordinatorProxyAddr);

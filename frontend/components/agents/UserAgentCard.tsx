@@ -15,7 +15,7 @@ function agentStatus(metrics?: AgentState): AgentStatus {
   if (!metrics) return 'WAITING';
   if (metrics.loop_stopped) return 'STOPPED';
   if (metrics.decisions_total > 0 || metrics.orders_placed > 0) return 'ACTIVE';
-  return 'WAITING';
+  return 'STARTING';
 }
 
 interface Props {
@@ -58,7 +58,7 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="text-lg">{agent.icon ?? '🤖'}</span>
+          <span className="text-lg">{agent.icon || '🤖'}</span>
           <div className="flex flex-col gap-0.5">
             <div className="flex items-center gap-1.5">
               <span className="text-sm font-bold text-white">{agent.name}</span>
@@ -93,28 +93,42 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
         Strategy: <span className="text-gray-400 italic">AI-defined (on-chain)</span>
       </p>
 
-      {/* Stats row */}
+      {/* Stats — balances row */}
       {m && (
-        <div className="grid grid-cols-4 gap-1.5 text-center">
-          <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">sETH</p>
-            <p className="text-[10px] font-mono font-bold text-white">{(m.agt_balance ?? 0).toFixed(2)}</p>
+        <>
+          <div className="grid grid-cols-2 gap-1.5 text-center">
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">sETH</p>
+              <p className="text-[10px] font-mono font-bold text-white">{(m.agt_balance ?? 0).toFixed(4)}</p>
+            </div>
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">USDC</p>
+              <p className="text-[10px] font-mono font-bold text-cyan-300">{(m.quote_balance ?? 0).toFixed(2)}</p>
+            </div>
           </div>
-          <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">Last</p>
-            <p className={`text-[10px] font-mono font-bold ${lastColor}`}>{m.last_decision ?? '—'}</p>
+
+          {/* Stats — activity row */}
+          <div className="grid grid-cols-4 gap-1.5 text-center">
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">Orders</p>
+              <p className="text-[10px] font-mono font-bold text-white">{m.orders_placed ?? 0}</p>
+            </div>
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">Decisions</p>
+              <p className="text-[10px] font-mono font-bold text-white">{m.decisions_total}</p>
+            </div>
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">Last</p>
+              <p className={`text-[10px] font-mono font-bold ${lastColor}`}>{m.last_decision ?? '—'}</p>
+            </div>
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">P&L</p>
+              <p className={`text-[10px] font-mono font-bold ${(m.trade_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {(m.trade_pnl ?? 0) >= 0 ? '+' : ''}{(m.trade_pnl ?? 0).toFixed(4)}
+              </p>
+            </div>
           </div>
-          <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">Decisions</p>
-            <p className="text-[10px] font-mono font-bold text-white">{m.decisions_total}</p>
-          </div>
-          <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">P&L</p>
-            <p className={`text-[10px] font-mono font-bold ${(m.trade_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {(m.trade_pnl ?? 0) >= 0 ? '+' : ''}{(m.trade_pnl ?? 0).toFixed(4)}
-            </p>
-          </div>
-        </div>
+        </>
       )}
 
       {/* BUY/SELL/HOLD bar */}

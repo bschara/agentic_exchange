@@ -13,16 +13,9 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Well-known Hardhat default account private keys (deterministic from test mnemonic).
-// These are printed by `npx hardhat node`. Safe to use for local testing only.
-const HARDHAT_PKS = [
-  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', // Account #0 deployer
-  '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d', // Account #1 market_maker
-  '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a', // Account #2 momentum_trader
-  '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6', // Account #3 arbitrage_agent
-  '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a', // Account #4 risk_manager
-  '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba', // Account #5 noise_trader
-];
+// Well-known Hardhat default account private key for the deployer (Account #0).
+// Safe to use for local testing only.
+const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 const AGENT_IDS = ['market_maker', 'momentum_trader', 'arbitrage_agent', 'risk_manager', 'noise_trader'];
 
@@ -42,7 +35,7 @@ const PRICE_DECIMALS = 0;
 const PROMPTS = {
   market_maker:
     'You are MM-Prime, an autonomous market maker on the Somnia blockchain. ' +
-    'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+    'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
     'Goal: profit from the bid-ask spread by always providing liquidity on both sides. ' +
     'BUY if best ask exists and ask price is at or above reference price (capture sell-side spread). ' +
     'SELL if best bid exists and bid price is at or below reference price (capture buy-side spread). ' +
@@ -50,36 +43,35 @@ const PROMPTS = {
     'Respond with exactly one word: BUY or SELL.',
   momentum_trader:
     'You are Momentum-Alpha, an autonomous momentum trader on the Somnia blockchain. ' +
-    'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+    'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
     'Goal: ride price trends for directional profit. ' +
     'BUY if ETH reference price is higher than or equal to the on-chain last trade price (upward momentum). ' +
     'SELL if ETH reference price is lower than the on-chain last trade price (downward momentum). ' +
+    'Use Book counts to gauge conviction: a heavily one-sided book suggests the trend may reverse. ' +
     'Respond with exactly one word: BUY or SELL.',
   arbitrage_agent:
     'You are Arb-Scanner, an autonomous arbitrage agent on the Somnia blockchain. ' +
-    'You receive: ETH reference price (from CoinGecko), on-chain last trade price, best bid, best ask. ' +
+    'You receive: ETH reference price (from CoinGecko), on-chain last trade price, best bid, best ask, and Book order counts. ' +
     'Goal: exploit price gaps between the reference market and the on-chain exchange. ' +
     'BUY if the on-chain last trade price is below the ETH reference price (on-chain underpriced). ' +
     'SELL if the on-chain last trade price is above or equal to the ETH reference price (on-chain overpriced or at parity). ' +
+    'The arb signal takes priority — keep the on-chain price close to the oracle. ' +
     'Respond with exactly one word: BUY or SELL.',
   risk_manager:
     'You are Risk-Shield, an autonomous risk management agent on the Somnia blockchain. ' +
-    'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+    'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
     'Goal: maintain market stability by providing liquidity and hedging risk. ' +
     'BUY if there is no best bid, or if the on-chain last trade price is more than $5 below ETH reference (support the market). ' +
     'SELL if there is no best ask, or if the on-chain last trade price is more than $5 above ETH reference (resist the spike). ' +
     'If both conditions are neutral, BUY if last trade is below reference, SELL if above. ' +
     'Respond with exactly one word: BUY or SELL.',
-  noise_trader:
-    'You are Noise-Bot, a random noise trading agent on the Somnia blockchain. ' +
-    'Your goal is to keep the market active with unpredictable orders. ' +
-    'If the ETH reference price ends in an even digit, BUY. If odd, SELL. ' +
-    'Respond with exactly one word: BUY or SELL.',
+  // Empty prompt = rule-based agent: coordinator detects this and runs
+  // _executeRuleDecision (mean-reversion against oracle) instead of LLM inference.
+  noise_trader: '',
 };
 
 async function main() {
-  const [deployer, mm, momentum, arb, risk, noise] = await hre.ethers.getSigners();
-  const agentSigners = [mm, momentum, arb, risk, noise];
+  const [deployer] = await hre.ethers.getSigners();
 
   console.log('\n═══ Local Hardhat Deployment ══════════════════════════════');
   console.log('Deployer:', deployer.address);
@@ -167,20 +159,20 @@ async function main() {
   await (await coordinator.setRegistry(registryAddr)).wait();
   console.log('coordinator.setRegistry() done');
 
-  // 9. Mint sETH + USDC to coordinator, approve Exchange for both
-  await (await token.mint(coordinatorAddr, hre.ethers.parseEther('10000'))).wait();
-  console.log('Minted 10K sETH to AgentCoordinator');
+  // 9. Mint sETH + USDC to coordinator (50K each: 5 agents × 10K), approve Exchange for both
+  await (await token.mint(coordinatorAddr, hre.ethers.parseEther('50000'))).wait();
+  console.log('Minted 50K sETH to AgentCoordinator');
   await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
   console.log('AgentCoordinator approved Exchange for sETH');
-  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('10000'))).wait();
-  console.log('Minted 10K QUOTE to AgentCoordinator');
+  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('50000'))).wait();
+  console.log('Minted 50K QUOTE to AgentCoordinator');
   await (await coordinator.approveToken(quoteTokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
   console.log('AgentCoordinator approved Exchange for QUOTE');
 
-  // 10. Register ALL system agents via AgentRegistry.registerAgent()
-  //    Deployer is msg.sender → agentOwner = deployer for all system agents.
-  //    This replaces the old separate setAgentConfig() + setSystemPrompt() calls.
-  console.log('\n─── Registering system agents via unified AgentRegistry ───');
+  // 10. Register ALL system agents and allocate virtual capital in coordinator pool.
+  //     Deployer is msg.sender → agentOwner = deployer for all system agents.
+  //     noise_trader uses empty systemPrompt → coordinator routes it to rule-based logic.
+  console.log('\n─── Registering system agents and allocating virtual capital ───');
   for (const id of AGENT_IDS) {
     const meta = AGENT_META[id];
     const tx = await registry.registerAgent(
@@ -194,29 +186,22 @@ async function main() {
       PRICE_DECIMALS
     );
     await tx.wait();
-    console.log(`  ${id}: registered (owner=deployer, icon=${meta.icon}, risk=${meta.riskLevel})`);
+    // Give each agent an equal 10K sETH + 10K QUOTE virtual allocation in the coordinator pool
+    await (await coordinator.allocateToAgent(
+      id,
+      deployer.address,
+      hre.ethers.parseEther('10000'),
+      hre.ethers.parseEther('10000')
+    )).wait();
+    const tag = id === 'noise_trader' ? 'rule-based' : `prompt set`;
+    console.log(`  ${id}: registered + 10K/10K allocated (${tag})`);
   }
 
   // 11. Fund coordinator with ETH for Somnia platform deposits
   await (await coordinator.fund({ value: hre.ethers.parseEther('0.5') })).wait();
   console.log('\nCoordinator funded: 0.5 ETH');
 
-  // 12. Fund agent treasuries + mint sETH + USDC to noise_trader
-  console.log('\n─── Funding agent treasuries ───────────────────────────────');
-  for (let i = 0; i < AGENT_IDS.length; i++) {
-    const signer = agentSigners[i];
-    await (await treasury.depositFor(signer.address, { value: hre.ethers.parseEther('0.1') })).wait();
-    console.log(`  ${AGENT_IDS[i]}: 0.1 ETH in treasury`);
-  }
-
-  const noiseSigner = agentSigners[4];
-  await (await token.mint(noiseSigner.address, hre.ethers.parseEther('10000'))).wait();
-  await (await token.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
-  await (await quoteToken.mint(noiseSigner.address, hre.ethers.parseEther('10000'))).wait();
-  await (await quoteToken.connect(noiseSigner).approve(exchangeAddr, hre.ethers.MaxUint256)).wait();
-  console.log(`\nNoise trader: 10,000 sETH + 10K QUOTE + Exchange approved (${noiseSigner.address})`);
-
-  // 13. Write deployment JSON
+  // 12. Write deployment JSON
   const mockArtifact  = await hre.artifacts.readArtifact('MockPlatform');
   const tokenArtifact = await hre.artifacts.readArtifact('AgentToken');
   const quoteArtifact = await hre.artifacts.readArtifact('QuoteToken');
@@ -248,13 +233,6 @@ async function main() {
       AgentCoordinator: coordArtifact.abi,
       AgentRegistry:    regArtifact.abi,
     },
-    agents: {
-      market_maker:    { address: agentSigners[0].address, pk: HARDHAT_PKS[1] },
-      momentum_trader: { address: agentSigners[1].address, pk: HARDHAT_PKS[2] },
-      arbitrage_agent: { address: agentSigners[2].address, pk: HARDHAT_PKS[3] },
-      risk_manager:    { address: agentSigners[3].address, pk: HARDHAT_PKS[4] },
-      noise_trader:    { address: agentSigners[4].address, pk: HARDHAT_PKS[5] },
-    },
   };
 
   const deploymentsDir = path.join(__dirname, '../deployments');
@@ -266,17 +244,13 @@ async function main() {
   console.log('\n═══ Paste into backend/.env ════════════════════════════════');
   console.log('SOMNIA_RPC_URL=http://127.0.0.1:8545');
   console.log('SOMNIA_CHAIN_ID=31337');
+  console.log(`DEPLOYER_PRIVATE_KEY=${DEPLOYER_PK}`);
   console.log(`AGENT_TOKEN_ADDRESS=${tokenAddr}`);
   console.log(`QUOTE_TOKEN_ADDRESS=${quoteTokenAddr}`);
   console.log(`EXCHANGE_ADDRESS=${exchangeAddr}`);
   console.log(`AGENT_REGISTRY_ADDRESS=${registryAddr}`);
   console.log(`TREASURY_ADDRESS=${treasuryAddr}`);
   console.log(`AGENT_COORDINATOR_ADDRESS=${coordinatorAddr}`);
-  console.log(`MARKET_MAKER_PK=${HARDHAT_PKS[1]}`);
-  console.log(`MOMENTUM_TRADER_PK=${HARDHAT_PKS[2]}`);
-  console.log(`ARBITRAGE_AGENT_PK=${HARDHAT_PKS[3]}`);
-  console.log(`RISK_MANAGER_PK=${HARDHAT_PKS[4]}`);
-  console.log(`NOISE_TRADER_PK=${HARDHAT_PKS[5]}`);
   console.log('\n─── Paste into frontend/.env.local ─────────────────────────');
   console.log(`NEXT_PUBLIC_COORDINATOR_ADDRESS=${coordinatorAddr}`);
   console.log(`NEXT_PUBLIC_REGISTRY_ADDRESS=${registryAddr}`);

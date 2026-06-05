@@ -1,8 +1,12 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.auth import admin_auth
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -48,14 +52,22 @@ async def get_state():
 async def get_agents():
     if not _orchestrator:
         return []
-    return list(_orchestrator.get_agent_states().values())
+    try:
+        return list(_orchestrator.get_agent_states().values())
+    except Exception as e:
+        logger.error(f"GET /agents failed: {e}", exc_info=True)
+        raise
 
 
 @router.get("/chain-metrics")
 async def get_chain_metrics():
     if not _orchestrator:
         return {}
-    return _orchestrator._chain_metrics
+    try:
+        return _orchestrator._chain_metrics
+    except Exception as e:
+        logger.error(f"GET /chain-metrics failed: {e}", exc_info=True)
+        raise
 
 
 @router.post("/events/inject")
@@ -103,10 +115,9 @@ async def trigger_all_agents():
     results = {}
     from agents.orchestrator import AGENT_CONFIGS
     for cfg in AGENT_CONFIGS:
-        pk = getattr(settings, cfg["pk_key"])
         try:
             result = await _orchestrator._coordinator.trigger_decision(
-                agent_pk=pk,
+                agent_pk=settings.deployer_private_key,
                 agent_id=cfg["id"],
             )
             results[cfg["id"]] = {"ok": True, "tx": result.get("tx_hash")}
@@ -116,17 +127,13 @@ async def trigger_all_agents():
     return {"ok": True, "results": results}
 
 
-_ON_CHAIN_AGENTS = ["market_maker", "momentum_trader", "arbitrage_agent", "risk_manager"]
-# Agents with no coordinator-driven loop (noise_trader runs pure Python)
-_PYTHON_ONLY_AGENTS = {"noise_trader"}
+_ON_CHAIN_AGENTS = ["market_maker", "momentum_trader", "arbitrage_agent", "risk_manager", "noise_trader"]
+# No Python-only agents remain — noise_trader now runs its rule-based loop on-chain
+_PYTHON_ONLY_AGENTS: set[str] = set()
 
 
 def _agent_pk(agent_id: str) -> str:
-    """Return the appropriate PK for triggering a given agent. User agents use deployer key."""
-    from agents.orchestrator import AGENT_CONFIGS
-    for c in AGENT_CONFIGS:
-        if c["id"] == agent_id:
-            return getattr(settings, c["pk_key"])
+    """Return deployer PK for triggering any agent (onlyOwner on coordinator)."""
     return settings.deployer_private_key
 
 
@@ -199,7 +206,7 @@ async def pause_all_agents():
             agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
             if agent_wallet and _orchestrator._registry:
                 try:
-                    await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, False)
+                    await _orchestrator._registry.set_active(settings.deployer_private_key, agent_id, False)
                 except Exception:
                     pass
             results[agent_id] = {"ok": True, "tx": result.get("tx_hash")}
@@ -225,7 +232,7 @@ async def resume_all_agents():
             agent_wallet = _orchestrator.agents.get(agent_id, {}).get("wallet_address")
             if agent_wallet and _orchestrator._registry:
                 try:
-                    await _orchestrator._registry.set_active(settings.deployer_private_key, agent_wallet, True)
+                    await _orchestrator._registry.set_active(settings.deployer_private_key, agent_id, True)
                 except Exception:
                     pass
             trigger = await _orchestrator._coordinator.trigger_decision(

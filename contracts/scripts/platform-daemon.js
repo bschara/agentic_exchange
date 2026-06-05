@@ -6,7 +6,7 @@
 //   node scripts/platform-daemon.js
 //
 // Leave running while testing. The backend's startup triggers kick off the first cycle per agent;
-// the daemon keeps all 4 on-chain loops alive indefinitely. (noise_trader uses a Python loop.)
+// the daemon keeps all 5 on-chain loops alive indefinitely.
 
 import { ethers } from 'ethers';
 import fs from 'fs';
