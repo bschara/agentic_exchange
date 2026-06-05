@@ -105,8 +105,8 @@ class MetricsCollector:
     # ── Trade event poll (1 s) ────────────────────────────────────────────────
 
     async def run_trade_poll(self) -> None:
-        from_block = await self.get_start_block()
-        logger.info(f"Trade event poll starting from block {from_block}")
+        from_block = 0  # start from genesis to catch all historical fills
+        logger.info("Trade event poll starting from block 0 (full history scan)")
         while True:
             try:
                 if self._coordinator:
@@ -147,9 +147,52 @@ class MetricsCollector:
                     if events:
                         from_block = max(e["block"] for e in events) + 1
 
+                # Apply any injected events (whale buys, crashes, etc.)
+                for ev in await self._state_bus.get_injected_events():
+                    try:
+                        await self._apply_injected_event(ev)
+                    except Exception as e:
+                        logger.error(f"Injected event apply error: {e}")
+
             except Exception as e:
                 logger.error(f"Trade event poll error: {e}")
             await asyncio.sleep(1.0)
+
+    # ── Event injection handler ───────────────────────────────────────────────
+
+    _SHOCK_MULTIPLIERS = {
+        "whale_buy":        1.03,
+        "whale_sell":       0.97,
+        "flash_crash":      0.92,
+        "news_event":       1.015,
+    }
+
+    async def _apply_injected_event(self, event: dict) -> None:
+        event_type = event["type"]
+        current_price = self._price_tracker.price
+        candle_updates: dict[int, dict] = {}
+
+        if event_type in self._SHOCK_MULTIPLIERS:
+            shocked = current_price * self._SHOCK_MULTIPLIERS[event_type]
+            bar = await self._state_bus.record_fill(shocked, 0.001)
+            if bar:
+                candle_updates[bar["time"]] = bar
+
+        elif event_type == "volatility_spike":
+            # 5 alternating ±2% ticks — makes the bar visibly spike high/low
+            base = current_price
+            for i in range(5):
+                factor = 1.02 if i % 2 == 0 else 0.98
+                base = base * factor
+                bar = await self._state_bus.record_fill(base, 0.001)
+                if bar:
+                    candle_updates[bar["time"]] = bar
+
+        current = self._price_tracker.get_current_bar()
+        if current:
+            candle_updates[current["time"]] = current
+        for bar in sorted(candle_updates.values(), key=lambda b: b["time"]):
+            await self._hub.broadcast({"type": "candle", "data": bar})
 
     def _record_pnl_from_trade(
         self, event: dict, buyer_id: Optional[str], seller_id: Optional[str]
@@ -198,21 +241,40 @@ class MetricsCollector:
         metrics["last_update"] = time.time()
         max_block = from_block
 
-        max_block = await self._process_coordinator_events(from_block, max_block)
-        max_block = await self._process_exchange_metrics(from_block, max_block)
-        await self._process_treasury_balances()
-        await self._sync_registry_data()
+        try:
+            max_block = await self._process_coordinator_events(from_block, max_block)
+        except Exception as e:
+            logger.error(f"collect: _process_coordinator_events failed: {e}", exc_info=True)
+        try:
+            max_block = await self._process_exchange_metrics(from_block, max_block)
+        except Exception as e:
+            logger.error(f"collect: _process_exchange_metrics failed: {e}", exc_info=True)
+        try:
+            await self._process_treasury_balances()
+        except Exception as e:
+            logger.error(f"collect: _process_treasury_balances failed: {e}", exc_info=True)
+        try:
+            await self._process_virtual_balances()
+        except Exception as e:
+            logger.error(f"collect: _process_virtual_balances failed: {e}", exc_info=True)
+        try:
+            await self._sync_registry_data()
+        except Exception as e:
+            logger.error(f"collect: _sync_registry_data failed: {e}", exc_info=True)
 
-        for agent in self._agents.values():
-            agent_id = agent["agent_id"]
+        for agent_id, agent in list(self._agents.items()):
             if agent_id in metrics["agents"]:
-                metrics["agents"][agent_id]["wallet_address"] = agent["wallet_address"]
+                metrics["agents"][agent_id]["wallet_address"] = agent.get("wallet_address", "")
 
-        await self._hub.broadcast({
-            "type": "chain_metrics",
-            "data": metrics,
-            "timestamp": metrics["last_update"],
-        })
+        try:
+            await self._hub.broadcast({
+                "type": "chain_metrics",
+                "data": metrics,
+                "timestamp": metrics["last_update"],
+            })
+        except Exception as e:
+            logger.error(f"collect: chain_metrics broadcast failed: {e}", exc_info=True)
+
         return max_block + 1 if max_block > from_block else from_block
 
     async def _process_coordinator_events(self, from_block: int, max_block: int) -> int:
@@ -288,6 +350,32 @@ class MetricsCollector:
                     agent["loop_stopped"] = False
                     agent["loop_stopped_reason"] = None
                 logger.info(f"Agent resumed on-chain: {agent_id_str}")
+                self._on_agent_seen(agent_id_str)
+                # Restart the self-retrigger loop — pausing breaks the chain so we must kick it
+                if self._coordinator and agent_id_str:
+                    async def _resume_trigger(aid=agent_id_str):
+                        from config import settings
+                        agent_info = self._agents.get(aid, {})
+                        owner = agent_info.get("owner_address", "")
+                        if agent_info.get("is_user_agent") and owner:
+                            try:
+                                stt = await self._coordinator.get_user_stt_balance(owner)
+                                if stt < 0.05:
+                                    await self._coordinator.deposit_stt_for_owner(
+                                        settings.deployer_private_key, owner, 0.1
+                                    )
+                                    logger.info(f"STT topped up for resumed agent: {aid}")
+                            except Exception as e:
+                                logger.warning(f"STT top-up failed for {aid}: {e}")
+                        try:
+                            result = await self._coordinator.trigger_decision(
+                                agent_pk=settings.deployer_private_key,
+                                agent_id=aid,
+                            )
+                            logger.info(f"Re-triggered loop for resumed agent: {aid} tx={result.get('tx_hash','')[:16]}")
+                        except Exception as e:
+                            logger.warning(f"trigger_decision failed for resumed {aid}: {e}")
+                    asyncio.create_task(_resume_trigger())
 
             elif ev["event"] == "LLMRequestFired" and agent:
                 agent["last_fetched_price"] = float(ev.get("fetchedPrice", 0))
@@ -406,8 +494,23 @@ class MetricsCollector:
         metrics = self._chain_metrics
         metrics["total_locked"] = await self._treasury.get_total_locked()
         for agent in self._agents.values():
-            balance = await self._treasury.get_balance(agent["wallet_address"])
+            wallet = agent.get("wallet_address", "")
+            if not wallet or wallet == "0x" + "0" * 40:
+                continue
+            balance = await self._treasury.get_balance(wallet)
             metrics["agents"][agent["agent_id"]]["treasury_balance"] = balance
+
+    async def _process_virtual_balances(self) -> None:
+        if not self._coordinator:
+            return
+        for agent_id in self._chain_metrics.get("agents", {}):
+            try:
+                token_bal, quote_bal = await self._coordinator.get_agent_allocation(agent_id)
+                agent_data = self._chain_metrics["agents"][agent_id]
+                agent_data["agt_balance"] = token_bal
+                agent_data["quote_balance"] = quote_bal
+            except Exception:
+                pass
 
     async def _sync_registry_data(self) -> None:
         if not self._registry:
@@ -422,6 +525,7 @@ class MetricsCollector:
                     self._chain_metrics["agents"][agent_id] = empty_agent_metrics(agent_id)
                 ag = self._chain_metrics["agents"][agent_id]
                 ag["agent_name"] = info.get("name") or agent_id
+                ag["icon"]        = info.get("icon", "🤖")
                 ag["registered_at"] = info.get("createdAt", 0)
                 ag["active"] = info.get("active", True)
         except Exception as e:

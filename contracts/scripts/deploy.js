@@ -23,120 +23,137 @@ async function main() {
   const balance = await hre.ethers.provider.getBalance(deployer.address);
   console.log('Balance:', hre.ethers.formatEther(balance), 'STT');
 
-  // Deploy AgentToken (sETH — Somnia synthetic ETH)
+  // Deploy AgentToken (sETH — Somnia synthetic ETH) — upgradeable proxy
   const AgentToken = await hre.ethers.getContractFactory('AgentToken');
-  const token = await AgentToken.deploy('Somnia ETH', 'sETH');
+  const token = await hre.upgrades.deployProxy(
+    AgentToken,
+    ['Somnia ETH', 'sETH'],
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await token.waitForDeployment();
   const tokenAddr = await token.getAddress();
-  console.log('AgentToken deployed to:', tokenAddr);
+  console.log('AgentToken (proxy) deployed to:', tokenAddr);
 
-  // Deploy QuoteToken (USDC-equivalent — payment currency for BUY orders)
+  // Deploy QuoteToken (USDC-equivalent — payment currency for BUY orders) — upgradeable proxy
   const QuoteToken = await hre.ethers.getContractFactory('QuoteToken');
-  const quoteToken = await QuoteToken.deploy();
+  const quoteToken = await hre.upgrades.deployProxy(
+    QuoteToken,
+    [],
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await quoteToken.waitForDeployment();
   const quoteTokenAddr = await quoteToken.getAddress();
-  console.log('QuoteToken deployed to:', quoteTokenAddr);
+  console.log('QuoteToken (proxy) deployed to:', quoteTokenAddr);
 
-  // Deploy Exchange (sETH/USDC market — locks USDC on BUY, sETH on SELL)
+  // Deploy Exchange (sETH/USDC market — locks USDC on BUY, sETH on SELL) — upgradeable proxy
   const Exchange = await hre.ethers.getContractFactory('Exchange');
-  const exchange = await Exchange.deploy(tokenAddr, quoteTokenAddr);
+  const exchange = await hre.upgrades.deployProxy(
+    Exchange,
+    [tokenAddr, quoteTokenAddr],
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await exchange.waitForDeployment();
   const exchangeAddr = await exchange.getAddress();
-  console.log('Exchange deployed to:', exchangeAddr);
+  console.log('Exchange (proxy) deployed to:', exchangeAddr);
 
-  // Deploy AgentRegistry
-  const AgentRegistry = await hre.ethers.getContractFactory('AgentRegistry');
-  const registry = await AgentRegistry.deploy();
-  await registry.waitForDeployment();
-  const registryAddr = await registry.getAddress();
-  console.log('AgentRegistry deployed to:', registryAddr);
-
-  // Deploy Treasury
+  // Deploy Treasury — upgradeable proxy
   const Treasury = await hre.ethers.getContractFactory('Treasury');
-  const treasury = await Treasury.deploy();
+  const treasury = await hre.upgrades.deployProxy(
+    Treasury,
+    [],
+    { kind: 'uups', initializer: 'initialize' }
+  );
   await treasury.waitForDeployment();
   const treasuryAddr = await treasury.getAddress();
-  console.log('Treasury deployed to:', treasuryAddr);
+  console.log('Treasury (proxy) deployed to:', treasuryAddr);
 
-  // Deploy AgentCoordinator with both agent IDs
+  // Deploy AgentCoordinator — upgradeable proxy
+  //   constructor sets immutables (platform, exchange)
+  //   initialize() sets owner + agent IDs (called via proxy on first deploy)
   const AgentCoordinator = await hre.ethers.getContractFactory('AgentCoordinator');
-  const coordinator = await AgentCoordinator.deploy(
-    SOMNIA_PLATFORM_TESTNET,
-    exchangeAddr,
-    BigInt(LLM_AGENT_ID),
-    BigInt(JSON_API_AGENT_ID)
+  const coordinator = await hre.upgrades.deployProxy(
+    AgentCoordinator,
+    [deployer.address, BigInt(LLM_AGENT_ID), BigInt(JSON_API_AGENT_ID)],
+    {
+      kind: 'uups',
+      constructorArgs: [SOMNIA_PLATFORM_TESTNET, exchangeAddr],
+      initializer: 'initialize',
+    }
   );
   await coordinator.waitForDeployment();
   const coordinatorAddr = await coordinator.getAddress();
-  console.log('AgentCoordinator deployed to:', coordinatorAddr);
+  console.log('AgentCoordinator (proxy) deployed to:', coordinatorAddr);
 
-  // Set per-agent API configs on-chain (price data source for each agent)
-  const agentIds = ['market_maker', 'momentum_trader', 'arbitrage_agent', 'risk_manager', 'noise_trader'];
-  for (const id of agentIds) {
-    const tx = await coordinator.setAgentConfig(id, COINGECKO_ETH_URL, COINGECKO_SELECTOR, PRICE_DECIMALS);
-    await tx.wait();
-    console.log(`API config set on-chain for ${id}`);
-  }
+  // Deploy AgentRegistry — upgradeable proxy
+  const AgentRegistry = await hre.ethers.getContractFactory('AgentRegistry');
+  const registry = await hre.upgrades.deployProxy(
+    AgentRegistry,
+    [deployer.address, coordinatorAddr],
+    { kind: 'uups', initializer: 'initialize' }
+  );
+  await registry.waitForDeployment();
+  const registryAddr = await registry.getAddress();
+  console.log('AgentRegistry (proxy) deployed to:', registryAddr);
 
-  // Set strategy system prompts on-chain for all 4 agents.
-  // Context format the LLM receives: "ETH/USD: $N. On-chain last trade: $N. Best bid: $N. Best ask: $N."
-  const prompts = [
-    {
-      id: 'market_maker',
-      text:
-        'You are MM-Prime, an autonomous market maker on the Somnia blockchain. ' +
-        'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+  // Register all system agents via unified AgentRegistry.registerAgent()
+  // Deployer is msg.sender → agentOwner = deployer for all system agents.
+  const AGENT_META = {
+    market_maker:    { name: 'MM-Prime',       icon: '⚖️', riskLevel: 3,
+      prompt: 'You are MM-Prime, an autonomous market maker on the Somnia blockchain. ' +
+        'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
         'Goal: profit from the bid-ask spread by always providing liquidity on both sides. ' +
         'BUY if best ask exists and ask price is at or above reference price (capture sell-side spread). ' +
         'SELL if best bid exists and bid price is at or below reference price (capture buy-side spread). ' +
         'If no clear signal, alternate: BUY if last trade is below reference, SELL if above. ' +
-        'Respond with exactly one word: BUY or SELL.',
-    },
-    {
-      id: 'momentum_trader',
-      text:
-        'You are Momentum-Alpha, an autonomous momentum trader on the Somnia blockchain. ' +
-        'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+        'Respond with exactly one word: BUY or SELL.' },
+    momentum_trader: { name: 'Momentum-Alpha', icon: '📈', riskLevel: 4,
+      prompt: 'You are Momentum-Alpha, an autonomous momentum trader on the Somnia blockchain. ' +
+        'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
         'Goal: ride price trends for directional profit. ' +
         'BUY if ETH reference price is higher than or equal to the on-chain last trade price (upward momentum). ' +
         'SELL if ETH reference price is lower than the on-chain last trade price (downward momentum). ' +
-        'Respond with exactly one word: BUY or SELL.',
-    },
-    {
-      id: 'arbitrage_agent',
-      text:
-        'You are Arb-Scanner, an autonomous arbitrage agent on the Somnia blockchain. ' +
-        'You receive: ETH reference price (from CoinGecko), on-chain last trade price, best bid, best ask. ' +
+        'Use Book counts to gauge conviction: a heavily one-sided book suggests the trend may reverse. ' +
+        'Respond with exactly one word: BUY or SELL.' },
+    arbitrage_agent: { name: 'Arb-Scanner',    icon: '🔍', riskLevel: 3,
+      prompt: 'You are Arb-Scanner, an autonomous arbitrage agent on the Somnia blockchain. ' +
+        'You receive: ETH reference price (from CoinGecko), on-chain last trade price, best bid, best ask, and Book order counts. ' +
         'Goal: exploit price gaps between the reference market and the on-chain exchange. ' +
         'BUY if the on-chain last trade price is below the ETH reference price (on-chain underpriced). ' +
         'SELL if the on-chain last trade price is above or equal to the ETH reference price (on-chain overpriced or at parity). ' +
-        'Respond with exactly one word: BUY or SELL.',
-    },
-    {
-      id: 'risk_manager',
-      text:
-        'You are Risk-Shield, an autonomous risk management agent on the Somnia blockchain. ' +
-        'You receive: ETH reference price, on-chain last trade price, best bid, best ask. ' +
+        'The arb signal takes priority — keep the on-chain price close to the oracle. ' +
+        'Respond with exactly one word: BUY or SELL.' },
+    risk_manager:    { name: 'Risk-Shield',    icon: '🛡️', riskLevel: 2,
+      prompt: 'You are Risk-Shield, an autonomous risk management agent on the Somnia blockchain. ' +
+        'You receive: ETH reference price, on-chain last trade price, best bid, best ask, and Book order counts. ' +
         'Goal: maintain market stability by providing liquidity and hedging risk. ' +
         'BUY if there is no best bid, or if the on-chain last trade price is more than $5 below ETH reference (support the market). ' +
         'SELL if there is no best ask, or if the on-chain last trade price is more than $5 above ETH reference (resist the spike). ' +
         'If both conditions are neutral, BUY if last trade is below reference, SELL if above. ' +
-        'Respond with exactly one word: BUY or SELL.',
-    },
-    {
-      id: 'noise_trader',
-      text:
-        'You are Noise-Bot, a random noise trading agent on the Somnia blockchain. ' +
-        'Your goal is to keep the market active with unpredictable orders. ' +
-        'If the ETH reference price ends in an even digit, BUY. If odd, SELL. ' +
-        'Respond with exactly one word: BUY or SELL.',
-    },
-  ];
+        'Respond with exactly one word: BUY or SELL.' },
+    // Empty prompt = rule-based agent: coordinator routes to _executeRuleDecision
+    // (order-book balance) instead of LLM inference. No STT spent on LLM per cycle.
+    noise_trader:    { name: 'Noise-Bot',      icon: '🎲', riskLevel: 1, prompt: '' },
+  };
 
-  for (const { id, text } of prompts) {
-    const tx = await coordinator.setSystemPrompt(id, text);
+  // Wire registry into coordinator BEFORE registering agents —
+  // registerAgent() calls coordinator.addAgentToList() which requires onlyOwnerOrRegistry.
+  await (await coordinator.setRegistry(registryAddr)).wait();
+  console.log('coordinator.setRegistry() done');
+
+  console.log('\n─── Registering system agents and allocating virtual capital ───');
+  for (const [id, meta] of Object.entries(AGENT_META)) {
+    const tx = await registry.registerAgent(
+      id, meta.name, meta.icon, meta.riskLevel,
+      meta.prompt, COINGECKO_ETH_URL, COINGECKO_SELECTOR, PRICE_DECIMALS
+    );
     await tx.wait();
-    console.log(`System prompt set on-chain for ${id}`);
+    await (await coordinator.allocateToAgent(
+      id, deployer.address,
+      hre.ethers.parseEther('10000'),
+      hre.ethers.parseEther('10000')
+    )).wait();
+    const tag = id === 'noise_trader' ? 'rule-based' : 'prompt set';
+    console.log(`  ${id}: registered + 10K/10K allocated (${tag})`);
   }
 
   // Fund AgentCoordinator — needs 2 deposits per decision cycle (JSON API + LLM)
@@ -155,18 +172,11 @@ async function main() {
   await (await coordinator.approveToken(tokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
   console.log('AgentCoordinator approved Exchange for sETH');
 
-  // Mint 10M QUOTE to coordinator (for BUY orders)
-  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('10000000'))).wait();
-  console.log('Minted 10M QUOTE to AgentCoordinator');
+  // Mint 50K QUOTE to coordinator (5 agents × 10K each)
+  await (await quoteToken.mint(coordinatorAddr, hre.ethers.parseEther('50000'))).wait();
+  console.log('Minted 50K QUOTE to AgentCoordinator');
   await (await coordinator.approveToken(quoteTokenAddr, exchangeAddr, hre.ethers.MaxUint256)).wait();
   console.log('AgentCoordinator approved Exchange for QUOTE');
-
-  // Mint 10M QUOTE to noise_trader wallet if address provided via env
-  const noiseTraderAddr = process.env.NOISE_TRADER_ADDRESS || '';
-  if (noiseTraderAddr && hre.ethers.isAddress(noiseTraderAddr)) {
-    await (await quoteToken.mint(noiseTraderAddr, hre.ethers.parseEther('10000000'))).wait();
-    console.log(`Minted 10M QUOTE to noise_trader (${noiseTraderAddr})`);
-  }
 
   // Read ABIs from artifacts
   const tokenArtifact       = await hre.artifacts.readArtifact('AgentToken');

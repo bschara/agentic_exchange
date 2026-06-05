@@ -12,30 +12,30 @@
 
 Three features make this more than a trading demo: agents **read each other's decisions** before making their own (every LLM prompt includes live peer signals from the previous cycle), **consecutive wins scale order size** automatically (a 10-win streak trades at 3× base without any Python intervention), and when three agents reach unanimous consensus they fire an on-chain **coalition order at 3× normal size** — autonomous coordination between AI agents, entirely on-chain.
 
-A fourth feature — **composable user agents** — lets anyone connect their MetaMask wallet and deploy their own autonomous trading agent with a custom strategy prompt, pick an icon, set a risk level, fund it with STT, and pause/resume it, all trustlessly on-chain. No backend involvement after the initial `AgentRegistry.registerAgent()` transaction.
+A fourth feature — **composable user agents** — lets anyone connect their MetaMask wallet and deploy their own autonomous trading agent with a custom strategy prompt, pick an icon, set a risk level, fund it with STT for LLM cycles, and pause/resume it, all trustlessly on-chain.
 
 ---
 
 ## What It Is
 
-Five system AI agents autonomously trade on the Somnia blockchain (chain 50312). Every trading decision is validated by Somnia's decentralized LLM inference agent — not an off-chain bot. Every order is matched by a real on-chain limit order book. A live dashboard shows visible decision flow, real-time charts, a full-width latency comparison panel, event injection, and live on-chain metrics.
+Five system AI agents autonomously trade on the Somnia blockchain. Every trading decision for four of them is validated by Somnia's decentralized LLM inference agent — not an off-chain bot. The fifth (Noise-Bot) runs a fully on-chain mean-reversion rule with no LLM overhead. Every order is matched by a real on-chain limit order book. A live dashboard shows visible decision flow, real-time charts, a full-width latency comparison panel, event injection, and live on-chain metrics.
 
-Agents are not isolated. Before each decision, every agent's LLM prompt includes the previous cycle's decisions from all other agents (`"Peers: momentum_trader=BUY, risk_manager=SELL"`). Win streaks drive adaptive sizing. Three-agent consensus triggers coalition orders. All of this is verifiable on the Somnia explorer — every `LLMRequestFired` event carries the full prompt on-chain.
+All five agents share a single coordinator pool of synthetic tokens. Each agent has a **virtual sETH and USDC balance** tracked on-chain, updated on every fill and cancel via callbacks from the Exchange. The coordinator enforces per-agent limits — an agent that runs out of virtual balance skips orders without affecting others.
 
-Anyone can also deploy their own **composable user agent**: connect MetaMask → pick an icon, set a risk level, write a strategy prompt → call `AgentRegistry.registerAgent()` in one transaction → the backend detects the `AgentRegistered` event and starts the LLM loop automatically. Pause, resume, and fund directly from your wallet — no backend auth, no trusted intermediary.
+STT fees (for Somnia platform JSON API + LLM calls) are tracked **per user wallet**: all agents owned by the same address share one prepaid STT pool. Users fund their pool via `coordinator.fund()` — the existing step in the Create Agent flow.
 
 ---
 
 ## How It Works
 
-On startup, the orchestrator fires one `triggerAgentDecision()` per agent — that's the only Python transaction ever sent. From that point the `AgentCoordinator` self-loops forever: `handleDecision()` calls `_retrigger()` at the end of every cycle. Python never touches the contracts again.
+On startup, the orchestrator fires one `triggerAgentDecision()` per agent — that's the only Python transaction ever sent. From that point the `AgentCoordinator` self-loops forever: `handleDecision()` (or `_executeRuleDecision()` for rule-based agents) calls `_retrigger()` at the end of every cycle. Python never touches the contracts again for any trading decision.
 
 Four background loops keep the dashboard live:
 
 - **Trade event poll** (1s) — reads `TradeExecuted` events → drives the price chart
 - **Snapshot broadcast** (3s) — pushes market state to WebSocket clients
 - **Contract metrics poll** (5s) — reads coordinator events and contract state → emits `chain_metrics`
-- **Token replenisher** (30s) — polls QUOTE/AGT balances and auto-mints when below threshold
+- **Token replenisher** (30s) — polls the coordinator's QUOTE/AGT pool balance and auto-mints when below threshold
 
 ---
 
@@ -43,13 +43,15 @@ Four background loops keep the dashboard live:
 
 ### System Agents (pre-deployed)
 
-| Agent              | Name           | Strategy                                    | How it works                                                                     |
+All five agents share the coordinator's token pool. Each gets a virtual 10K sETH + 10K USDC allocation at deploy time.
+
+| Agent              | Name           | Strategy                                    | Decision source                                                                  |
 | ------------------ | -------------- | ------------------------------------------- | -------------------------------------------------------------------------------- |
-| ⚖️ Market Maker    | MM-Prime       | Dual-sided quoting, captures spread         | Places **both** a bid and an ask each cycle; cancels stale orders before placing |
-| 📈 Momentum Trader | Momentum-Alpha | Rides trends, enters long/short on momentum | Buys into upward momentum (on-chain ≥ reference), sells into downward            |
-| 🔍 Arbitrage Agent | Arb-Scanner    | Exploits reference vs on-chain price gap    | Buys when on-chain is underpriced vs CoinGecko, sells when overpriced            |
-| 🛡️ Risk Manager    | Risk-Shield    | Stabilises extremes, provides liquidity     | Buys when on-chain is >$5 below reference; sells when >$5 above                  |
-| 🎲 Noise Bot       | Noise-Bot      | Random order flow, keeps book alive         | Python-only loop placing random orders every 4–6 s (no LLM overhead)             |
+| ⚖️ Market Maker    | MM-Prime       | Dual-sided quoting, captures spread         | Somnia LLM — places **both** a bid and an ask each cycle                         |
+| 📈 Momentum Trader | Momentum-Alpha | Rides trends, enters long/short on momentum | Somnia LLM — buys into upward momentum, sells into downward                      |
+| 🔍 Arbitrage Agent | Arb-Scanner    | Exploits reference vs on-chain price gap    | Somnia LLM — buys when on-chain is underpriced vs oracle, sells when overpriced  |
+| 🛡️ Risk Manager    | Risk-Shield    | Stabilises extremes, provides liquidity     | Somnia LLM — buys/sells to contain ±$5 deviation from oracle                    |
+| 🎲 Noise Bot       | Noise-Bot      | Order-book balancing, keeps both sides live | On-chain rule — no LLM: more asks than bids → BUY; more bids than asks → SELL   |
 
 ### Composable User Agents
 
@@ -57,33 +59,23 @@ Any wallet can create their own autonomous agent:
 
 1. **Connect** MetaMask in the dashboard → click **MY AGENTS** tab → **CREATE AGENT**
 2. **Define** — pick an emoji icon, set a risk level (1 = conservative → 5 = aggressive, scales order size), write a strategy prompt. All stored on-chain in `AgentRegistry`
-3. **Deploy** — one MetaMask transaction calls `AgentRegistry.registerAgent()`; the registry configures the coordinator and emits `AgentRegistered`; the backend detects it and triggers the LLM loop
-4. **Fund** — send STT directly to `AgentCoordinator.fund()` from your wallet; each LLM cycle consumes 2 deposits
+3. **Deploy** — one MetaMask transaction calls `AgentRegistry.registerAgent()`; the registry configures the coordinator and emits `AgentRegistered`; the backend detects it, calls `allocateToAgent` (1000 sETH + 1000 USDC from pool), then fires the LLM loop
+4. **Fund** — send STT to `AgentCoordinator.fund()` from your wallet; all your agents draw from your shared STT balance. Each LLM cycle consumes 2 STT deposits (1 JSON API + 1 LLM)
 5. **Pause/Resume** — call `AgentRegistry.pauseAgent(agentId)` / `resumeAgent(agentId)` directly; ownership verified by `agents[agentId].agentOwner == msg.sender`
 
 User agents participate in the same on-chain LLM pipeline as system agents, read peer signals from all other agents, and appear in the scoreboard and activity feed.
 
-**4 agents are Somnia-native** when deployed (market_maker, momentum_trader, arbitrage_agent, risk_manager): on startup the orchestrator fires one `triggerAgentDecision()` per agent. From that point the contract is fully self-sustaining — `handleDecision()` calls `_retrigger()` at the end of every cycle. `noise_trader` runs as a pure Python coroutine placing random orders directly via the Exchange contract, keeping the book alive between LLM cycles. If the coordinator runs out of STT, it emits `LoopStopped(agentId, reason, balance)` and halts gracefully.
-
-**Cancel-before-place:** `AgentCoordinator` tracks `lastOrderId` (ASK) and `lastBidOrderId` (BID) per agent. Both are cancelled before each new cycle, preventing stale order buildup. Market Maker places two orders per cycle (bid + ask) at ±0.1% around the reference price.
-
-**Peer signals:** Every agent's LLM prompt is built on-chain in `_buildContext()` and includes the last recorded decision of every other agent. A momentum trader reads `"Peers: market_maker=BUY, arbitrage_agent=SELL, risk_manager=HOLD"` before deciding. The full prompt is emitted in the `context` field of the `LLMRequestFired` event — judges can see the inter-agent communication directly on the Somnia explorer.
-
-**Adaptive order sizing:** Each agent tracks a `winStreak` counter. Every filled order increments it; a HOLD or failed order resets it to zero. Order size scales by `1 + streak / 5` (capped at 5× base), computed entirely on-chain by `_orderAmount()`.
-
-**Coalition orders:** `AgentCoordinator` tracks `lastDecision` for every agent. After each decision is recorded, `_coalitionCount()` checks how many directional agents share the same decision. When exactly 3 agree, `_fireCoalitionOrder()` places a single coordinated order at 3× base size, emitting `CoalitionFormed(direction, agentCount, price, orderId)`. Fires once per convergence event; no Python trigger needed.
-
-**On-chain metrics:** The backend polls coordinator events every 5s — `DecisionExecuted` (now includes `streak`), `LLMRequestFired` (now includes full `context`), `CoalitionFormed`, `DecisionFailed`, `LoopStopped` — and reads live contract state (order book depth, coordinator STT balance, per-agent treasury balances, net positions). Coalition events are broadcast immediately as `coalition_alert` WebSocket messages in addition to the regular `chain_metrics` feed.
+**STT accounting:** `userSttBalance[walletAddress]` in the coordinator tracks how much STT each user has prepaid. All agents owned by the same wallet draw from one pool. The deployer's pool covers all 5 system agents.
 
 ---
 
 ## Tech Stack
 
-- **Frontend**: Next.js 14 + Tailwind CSS + TradingView Lightweight Charts v5 + Zustand + ethers.js (for on-chain ABI encoding)
+- **Frontend**: Next.js 14 + Tailwind CSS + TradingView Lightweight Charts v5 + Zustand + ethers.js
 - **Backend**: Python FastAPI + WebSockets (no off-chain AI — all decisions are on-chain)
-- **Contracts**: Solidity (AgentToken `sETH` ERC20, QuoteToken `USDC` ERC20, Exchange LOB, AgentCoordinator, AgentRegistry, Treasury) on Somnia testnet
+- **Contracts**: Solidity — all six contracts are upgradeable UUPS proxies: `AgentToken` (sETH ERC20), `QuoteToken` (USDC ERC20), `Exchange` (LOB), `Treasury`, `AgentCoordinator`, `AgentRegistry`
 - **Onchain AI**: Somnia LLM Inference Agent via `IAgentRequester` — BUY/SELL/HOLD consensus from Somnia validators
-- **User Agent Auth**: trustless — `agentOwner` in `AgentRegistry` enforces ownership; `AgentRegistry.pauseAgent/resumeAgent` verify `msg.sender == agentOwner` before calling coordinator
+- **User Agent Auth**: trustless — `agentOwner` in `AgentRegistry` enforces ownership on pause/resume
 
 ---
 
@@ -94,69 +86,70 @@ User agents participate in the same on-chain LLM pipeline as system agents, read
 │                    Somnia Blockchain (chain 50312)                    │
 │                                                                       │
 │  ┌─────────────────────────────────────────────────────────────┐    │
-│  │  Exchange.sol  (real on-chain LOB with matching engine)      │    │
-│  │  placeOrder() → _matchOrder() → TradeExecuted(price,amount) │    │
-│  └─────────────────────┬──────────────────────────────────────┘    │
-│                         │ placeOrder (coordinator is msg.sender)     │
-│  ┌──────────────────────┴──┐  ┌────────────────────────────────┐   │
-│  │  Treasury.sol            │  │  AgentCoordinator.sol          │   │
-│  └─────────────────────────┘  │  Pure execution engine          │   │
-│                                │  ┌── Runtime state only ────── │   │
-│                                │  │  winStreak, lastDecision    │   │
-│                                │  │  agentPaused, lastOrderId   │   │
-│                                │  │  _agentIdList               │   │
-│                                │  └─────────────────────────── │   │
-│                                │  Reads config via IAgentRegistry│   │
-│                                │  → getSystemPrompt()           │   │
-│                                │  → getPriceConfig()            │   │
-│                                │  → getRiskLevel()              │   │
-│                                │  _coalitionCount()==3 → 3×order│   │
-│                                │  _retrigger() → self-loop      │   │
-│                                └──────────────┬─────────────────┘   │
-│                    ▲                          │ platform fires       │
-│  ┌─────────────────┴──────────────────────────┴────────────────┐   │
-│  │  AgentRegistry.sol  (source of truth for ALL agents)         │   │
-│  │  registerAgent(agentId, name, icon, riskLevel, prompt, ...)  │   │
-│  │  → deploys: agentOwner, systemPrompt, priceConfig, riskLevel │   │
-│  │  → calls coordinator.addAgentToList(agentId)                 │   │
-│  │  → emits AgentRegistered                                      │   │
-│  │  pauseAgent / resumeAgent: onlyOwner OR agentOwner[id]       │   │
-│  │  getSystemPrompt / getPriceConfig / getRiskLevel (view)       │   │
-│  └─────────────────────────────────────────────────────────────┘   │
+│  │  Exchange.sol  (real on-chain LOB)                           │    │
+│  │  placeOrderForAgent(isBuy, price, amount, agentId)          │    │
+│  │    → _matchOrder → TradeExecuted                            │    │
+│  │    → onAgentFill(agentId, isBuy, tokenFill, quoteFill)      │    │
+│  │    cancelOrder → onAgentCancel(agentId, ...)                 │    │
+│  └──────────────────────┬───────────────────────────────────────┘   │
+│                          │ all orders from coordinator (msg.sender)   │
+│  ┌───────────────────────┴─────────────────────────────────────┐    │
+│  │  AgentCoordinator.sol   (shared coordinator pool)            │    │
+│  │                                                              │    │
+│  │  Token pool: 50K sETH + 50K USDC (5 agents × 10K each)      │    │
+│  │  agentTokenBalance[agentId] / agentQuoteBalance[agentId]     │    │
+│  │  userSttBalance[ownerAddress]  (STT per user wallet)         │    │
+│  │  agentOwner[agentId]  (cached at allocateToAgent time)       │    │
+│  │                                                              │    │
+│  │  LLM pipeline (4 agents):                                    │    │
+│  │    triggerAgentDecision → JSON API price fetch               │    │
+│  │    handlePriceData → LLM inference (deducts STT)             │    │
+│  │    handleDecision → placeOrderForAgent → _retrigger          │    │
+│  │                                                              │    │
+│  │  Rule-based pipeline (noise_trader, empty systemPrompt):     │    │
+│  │    triggerAgentDecision → JSON API price fetch               │    │
+│  │    handlePriceData → _executeRuleDecision (mean-reversion)   │    │
+│  │    → placeOrderForAgent → _retrigger                         │    │
+│  │                                                              │    │
+│  │  winStreak → _orderAmount()  |  _coalitionCount → 3× order   │    │
+│  └──────────────────────┬───────────────────────────────────────┘   │
+│                          │ reads config                               │
+│  ┌───────────────────────┴─────────────────────────────────────┐    │
+│  │  AgentRegistry.sol  (source of truth for ALL agents)         │    │
+│  │  registerAgent(agentId, name, icon, riskLevel, prompt, ...)  │    │
+│  │  → stores agentOwner, systemPrompt, priceConfig, riskLevel   │    │
+│  │  → calls coordinator.addAgentToList(agentId)                 │    │
+│  │  → emits AgentRegistered                                      │    │
+│  │  pauseAgent / resumeAgent: onlyOwner OR agentOwner[id]       │    │
+│  └─────────────────────────────────────────────────────────────┘    │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │  Somnia LLM Inference Agent                                   │    │
 │  │  inferString(ctx+peers+streak, systemPrompt, ["BUY","SELL","HOLD"])│
-│  │  → multi-validator consensus                                  │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────────┘
-     ↑ registry.registerAgent() → AgentRegistered event
+     ↑ registerAgent() from frontend MetaMask
      ↑ 1 startup tx per agent (triggerAgentDecision)
-┌────────┴─────────────────────────────────────────────────────────────┐
-│                         FastAPI Backend                               │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │  trade event poll (1s)  ──► PriceEngine ──► MarketStateBus   │  │
-│  │  snapshot broadcast (3s)                                       │  │
-│  │  contract metrics poll (5s) ──► chain_metrics                 │  │
-│  │    polls AgentRegistered → discovers new agents                │  │
-│  │    calls triggerAgentDecision() to start user agent loop       │  │
-│  │    caches agent in user_agents.json                            │  │
-│  │  watchdog (15s) → re-triggers stalled system + user agents    │  │
-│  │  GET /user/agents?address=0x... → cached agent list + metrics │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────┬───────────────────────────────────────┘
+┌────────┴──────────────────────────────────────────────────────────────┐
+│                         FastAPI Backend                                │
+│  · trade event poll (1s) ──► PriceEngine ──► MarketStateBus          │
+│  · snapshot broadcast (3s)                                            │
+│  · contract metrics poll (5s) ──► chain_metrics                      │
+│      detects AgentRegistered → allocateToAgent → triggerAgentDecision │
+│  · token replenisher (30s) → tops up coordinator pool only           │
+│  · watchdog → re-triggers stalled agents                             │
+└──────────────────────────────┬────────────────────────────────────────┘
                                │ WebSocket  ws://localhost:8000/ws
-┌──────────────────────────────▼───────────────────────────────────────┐
-│                    Next.js Dashboard                                  │
-│  SYSTEM AGENTS tab: 5 system agent cards (all owned by deployer)     │
-│  MY AGENTS tab (wallet-gated):                                       │
-│    Create Agent modal → icon picker + risk slider + prompt           │
-│    MetaMask → registry.registerAgent() on-chain                      │
-│    UserAgentCard: icon, risk badge, live metrics, PAUSE/RESUME/FUND  │
-│    pause/resume → registry · fund → coordinator.fund()               │
-│  ⚡ ADMIN tab (deployer only): per-agent + bulk pause/resume/fund    │
-│  Scoreboard: ALL agents ranked by P&L (system + user unified)       │
-│  Zustand: marketStore · agentStore · feedStore · userStore           │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────▼────────────────────────────────────────┐
+│                    Next.js Dashboard                                   │
+│  SYSTEM AGENTS tab: 5 system agent cards (all owned by deployer)      │
+│  MY AGENTS tab (wallet-gated):                                        │
+│    Create Agent modal → icon picker + risk slider + prompt            │
+│    MetaMask → registry.registerAgent() on-chain                       │
+│    UserAgentCard: icon, risk badge, live metrics, PAUSE/RESUME/FUND   │
+│    pause/resume → registry  |  fund → coordinator.fund()              │
+│  ⚡ ADMIN tab (deployer only): per-agent + bulk pause/resume/fund     │
+│  Scoreboard: ALL agents ranked by P&L (system + user unified)        │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -185,7 +178,7 @@ Terminal 2 — deploy contracts and write `somnia-local.json`:
 
 ```bash
 cd contracts && npx hardhat run scripts/deploy-local.js --network localhost
-# Prints env vars — copy them into backend/.env
+# Prints env vars — copy DEPLOYER_PRIVATE_KEY + contract addresses into backend/.env
 ```
 
 Terminal 3 — start everything (backend + frontend + platform daemon):
@@ -194,23 +187,11 @@ Terminal 3 — start everything (backend + frontend + platform daemon):
 ./start.sh
 ```
 
-`start.sh` auto-detects `SOMNIA_RPC_URL=http://127.0.0.1:8545` in `backend/.env` and starts the `platform-daemon.js` in a third tmux pane alongside the backend and frontend.
-
-Run the contract test suite (optional, Hardhat node must be running):
-
-```bash
-cd contracts && npx hardhat test
-```
-
-Smoke-test the full decision cycle end-to-end (optional, after contracts are deployed):
-
-```bash
-cd contracts && npx hardhat run scripts/test-local.js --network localhost
-```
+`start.sh` auto-detects `SOMNIA_RPC_URL=http://127.0.0.1:8545` in `backend/.env` and starts the `platform-daemon.js` alongside the backend and frontend.
 
 ### Option B — Somnia Testnet
 
-Prerequisites: Node.js 18+, Python 3.12+, 6 funded Somnia testnet wallets (1 deployer + 5 agents) — see [Deploying Onchain](#deploying-onchain).
+Prerequisites: Node.js 18+, Python 3.12+, **one funded deployer wallet** (~1 STT for deployment gas).
 
 ```bash
 git clone <repo>
@@ -219,41 +200,30 @@ cd backend && pip install -r requirements.txt && cd ..
 cd frontend && npm install && cd ..
 cd contracts && npm install && cd ..
 cd backend && cp .env.example .env
-# Fill all 6 private keys + contract addresses (see Deploying Onchain below)
-# The backend will refuse to start if any key is missing — error lists exactly what's wrong
+# Fill DEPLOYER_PRIVATE_KEY + contract addresses (see Deploying Onchain below)
 ./start.sh
 ```
-
-Opens backend at `http://localhost:8000` and frontend at `http://localhost:3000`.
 
 ---
 
 ## Deploying Onchain
 
-### Step 1 — Generate 6 wallets
-
-Run from `contracts/` (ethers is already installed):
+### Step 1 — Generate 1 deployer wallet
 
 ```bash
 node -e "
 const {ethers} = require('ethers');
-const labels = ['DEPLOYER','MARKET_MAKER','MOMENTUM_TRADER','ARBITRAGE_AGENT','RISK_MANAGER','NOISE_TRADER'];
-for (let i = 0; i < 6; i++) {
-  const w = ethers.Wallet.createRandom();
-  console.log(labels[i] + '_PK=' + w.privateKey);
-  console.log(labels[i] + '_ADDR=' + w.address);
-  console.log('');
-}
+const w = ethers.Wallet.createRandom();
+console.log('DEPLOYER_PK=' + w.privateKey);
+console.log('DEPLOYER_ADDR=' + w.address);
 "
 ```
 
-Save the output — you'll need all 6 private keys.
+### Step 2 — Fund via Somnia faucet
 
-### Step 2 — Fund wallets via Somnia faucet
+Visit **https://testnet.somnia.network/** and request STT for the deployer address (~1 STT needed for deployment).
 
-Visit **https://testnet.somnia.network/** and request STT for each of the 6 wallet addresses. Each wallet needs at least 0.5 STT (deployer needs ~1 STT for contract deployment).
-
-### Step 3 — Configure contracts and deploy
+### Step 3 — Deploy contracts
 
 ```bash
 cd contracts
@@ -261,46 +231,35 @@ cp .env.example .env
 # Fill DEPLOYER_PRIVATE_KEY in contracts/.env
 
 npx hardhat run scripts/deploy.js --network somnia
-# Deploys Exchange, AgentRegistry, Treasury, AgentCoordinator
-# Sets per-agent system prompts on-chain for all 5 agents
-# Funds AgentCoordinator with 0.2 STT for LLM request deposits
-# Prints the exact env vars to copy
+# Deploys all 6 contracts as UUPS proxies
+# Registers all 5 system agents + allocates 10K sETH / 10K USDC each
+# Funds coordinator with 0.5 STT for platform deposits
+# Prints proxy addresses to paste into backend/.env
 ```
 
-### Step 4 — Register agents and fund treasuries
+To upgrade any contract after a code change:
 
 ```bash
-# Fill the 5 agent PKs in contracts/.env first
-npx hardhat run scripts/seed.js --network somnia
-# Registers agents in AgentRegistry, deposits 0.1 STT each in Treasury
-# Sends 0.05 STT gas to each agent wallet (skips if already funded)
-# Mints 1M sETH to each agent wallet and approves Exchange
+npx hardhat run scripts/upgrade.js --network somnia
+# Address unchanged, all storage preserved
 ```
 
-### Step 5 — Configure backend and restart
+### Step 4 — Configure backend
 
 ```bash
 cd backend && cp .env.example .env
-# Fill in all 6 private keys and the contract addresses printed by deploy.js
 ```
-
-`AGENT_TOKEN_ADDRESS`, `QUOTE_TOKEN_ADDRESS`, and all other contract addresses are **auto-loaded from `somnia-testnet.json`** if you leave them blank — you only need the wallet keys and RPC settings. The backend **will not start** if any private key is missing or invalid when connecting to a non-localhost chain (clear error message lists exactly what is wrong):
 
 ```
 SOMNIA_RPC_URL=https://dream-rpc.somnia.network
 SOMNIA_CHAIN_ID=50312
 SOMNIA_BLOCK_MS=400
 DEPLOYER_PRIVATE_KEY=0x<your_deployer_key>
-MARKET_MAKER_PK=0x<market_maker_key>
-MOMENTUM_TRADER_PK=0x<momentum_trader_key>
-ARBITRAGE_AGENT_PK=0x<arbitrage_agent_key>
-RISK_MANAGER_PK=0x<risk_manager_key>
-NOISE_TRADER_PK=0x<noise_trader_key>
 ```
 
-### Step 6 — Configure frontend
+All contract addresses are auto-loaded from the deployment JSON if left blank.
 
-Set three values in `frontend/.env.local`:
+### Step 5 — Configure frontend
 
 ```
 NEXT_PUBLIC_DEPLOYER_ADDRESS=0xYourDeployerAddress
@@ -308,33 +267,17 @@ NEXT_PUBLIC_REGISTRY_ADDRESS=0xYourAgentRegistryAddress
 NEXT_PUBLIC_COORDINATOR_ADDRESS=0xYourAgentCoordinatorAddress
 ```
 
-`NEXT_PUBLIC_DEPLOYER_ADDRESS` — shows the ⚡ ADMIN tab to the deployer wallet; determines which wallet sees admin controls.  
-`NEXT_PUBLIC_REGISTRY_ADDRESS` — the `AgentRegistry` contract address; `registerAgent()`, `pauseAgent()`, `resumeAgent()` are called here.  
-`NEXT_PUBLIC_COORDINATOR_ADDRESS` — the `AgentCoordinator` address; only `fund()` is called directly here.
-
-For local dev, `deploy-local.js` prints the exact lines to paste. Hardhat account #0 (`0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`) is always the deployer.
-
-Then restart:
-
-```bash
-./start.sh
-```
-
-Verify at the Somnia explorer: **https://shannon-explorer.somnia.network**
-
 ---
 
 ## Demo Events
 
-Click the event injection buttons to watch agents react in real-time:
-
-| Button         | Effect                          | What to watch                                                      |
-| -------------- | ------------------------------- | ------------------------------------------------------------------ |
-| WHALE BUY +3%  | Instant +3% price shock         | Momentum Trader enters long; Risk Manager monitors exposure        |
-| WHALE SELL -3% | Instant -3% price shock         | Momentum Trader enters short; MM widens spread                     |
-| VOL SPIKE      | 5× volatility for 30 seconds    | MM-Prime widens spread; all agents reduce position sizes           |
-| NEWS EVENT     | 3× volatility + 1.5% upside     | Mixed agent reactions — some buy, Risk Manager monitors            |
-| FLASH CRASH    | -8% price shock + 8× volatility | Risk Manager broadcasts high-severity warning; all agents scramble |
+| Button         | Effect                          | What to watch                                               |
+| -------------- | ------------------------------- | ----------------------------------------------------------- |
+| WHALE BUY +3%  | Instant +3% price shock         | Momentum Trader enters long; Arb-Scanner detects deviation  |
+| WHALE SELL -3% | Instant -3% price shock         | Momentum Trader enters short; MM widens spread              |
+| VOL SPIKE      | 5× volatility for 30 seconds    | MM-Prime widens spread; Risk-Shield monitors exposure       |
+| NEWS EVENT     | 3× volatility + 1.5% upside     | Mixed agent reactions via peer signals                      |
+| FLASH CRASH    | -8% price shock + 8× volatility | Risk Manager broadcasts warning; all agents scramble        |
 
 ---
 
@@ -342,169 +285,105 @@ Click the event injection buttons to watch agents react in real-time:
 
 ```
 somnia_hackathon/
-├── contracts/              # Hardhat + Solidity
+├── contracts/
 │   ├── contracts/
-│   │   ├── AgentToken.sol       # mintable ERC20 (sETH / Somnia ETH): owner-mint, unlimited supply, no OZ dependency
-│   │   ├── QuoteToken.sol       # USDC-equivalent ERC20 for BUY-order payment; public faucet() for testnet top-up
-│   │   ├── Exchange.sol         # real on-chain LOB: placeOrder → _matchOrder → TradeExecuted
-│   │   │                        # BUY orders lock USDC (quoteToken) via transferFrom; SELL orders lock sETH
-│   │   │                        # fills: sETH → buyer, USDC → seller; cancels: refund locked token to placer
-│   │   │                        # price discovery: lastTradePrice updated on every fill — used by coordinator
-│   │   ├── AgentCoordinator.sol # Pure execution engine — reads config from AgentRegistry
-│   │   │                        # Runtime state only: winStreak, lastDecision, agentPaused
-│   │   │                        # lastOrderId (ASK) + lastBidOrderId (BID) — both cancelled each cycle
-│   │   │                        # basePrice: on-chain lastTradePrice when available, ETH oracle on cold start
-│   │   │                        # IAgentRegistry interface: getPriceConfig, getSystemPrompt, getRiskLevel
-│   │   │                        # addAgentToList(): called by registry on agent registration
-│   │   │                        # winStreak → _orderAmount() (risk-level scaled)
-│   │   │                        # _coalitionCount: CoalitionFormed when 3 agents agree
-│   │   ├── AgentRegistry.sol    # Unified registry for ALL agents (system + user, string-ID keyed)
-│   │   │                        # registerAgent(): single entry point for all agent creation
-│   │   │                        # agentOwner: deployer for system agents, user wallet for custom
-│   │   │                        # systemPrompt, priceConfig, riskLevel stored here
-│   │   │                        # pauseAgent/resumeAgent: onlyOwner OR agentOwner[id]
-│   │   │                        # getSystemPrompt/getPriceConfig/getRiskLevel: view getters for coordinator
-│   │   ├── Treasury.sol         # per-agent balances
-│   │   └── MockPlatform.sol     # local dev: simulates Somnia platform callbacks
+│   │   ├── AgentToken.sol          # Upgradeable ERC20 (sETH) — minted to coordinator pool
+│   │   ├── QuoteToken.sol          # Upgradeable ERC20 (USDC) — BUY order payment currency
+│   │   ├── Exchange.sol            # Upgradeable LOB — placeOrderForAgent with fill/cancel callbacks
+│   │   │                           # IAgentFillCallback: onAgentFill / onAgentCancel
+│   │   │                           # _orderAgentId[orderId] → per-order agentId for attribution
+│   │   ├── AgentCoordinator.sol    # Upgradeable execution engine
+│   │   │                           # agentTokenBalance[agentId] / agentQuoteBalance[agentId]
+│   │   │                           # userSttBalance[ownerAddr] — prepaid STT per user wallet
+│   │   │                           # agentOwner[agentId] — cached at allocateToAgent time
+│   │   │                           # allocateToAgent(agentId, owner, tokenAmt, quoteAmt)
+│   │   │                           # fund() / depositStt(forOwner) — STT deposit
+│   │   │                           # LLM pipeline: trigger → handlePriceData → handleDecision
+│   │   │                           # Rule pipeline: trigger → handlePriceData → _executeRuleDecision
+│   │   │                           # winStreak, coalitions, cancel-before-place, peer signals
+│   │   ├── AgentRegistry.sol       # Upgradeable registry for all agents (system + user)
+│   │   │                           # agentOwner — deployer for system, user wallet for custom
+│   │   │                           # pauseAgent/resumeAgent: onlyOwner OR agentOwner[id]
+│   │   ├── Treasury.sol            # Upgradeable per-agent ETH balance tracker
+│   │   └── MockPlatform.sol        # Local dev: simulates Somnia platform callbacks
 │   ├── scripts/
-│   │   ├── deploy.js            # testnet: deploys all contracts, sets on-chain prompts (5 agents)
-│   │   ├── seed.js              # testnet: registers agents, funds treasuries, mints sETH
-│   │   ├── deploy-local.js      # local: deploys to Hardhat, writes somnia-local.json (6 signers)
-│   │   ├── platform-daemon.js   # local: listens for MockPlatform events, fires price + LLM callbacks
-│   │   ├── test-local.js        # local: one-shot smoke test for the full decision cycle
-│   │   └── verify.js            # testnet: verifies contracts on Somnia explorer
-│   ├── test/
-│   │   ├── Exchange.test.cjs          # LOB: order placement, matching engine, fills, cancellation
-│   │   ├── AgentCoordinator.test.cjs  # full 3-tx pipeline, coalition detection, win streaks, peer signals, LoopStopped
-│   │   ├── AgentRegistry.test.cjs     # agent registration, reputation updates
-│   │   └── Treasury.test.cjs          # deposit, withdraw, allocate, getBalance
+│   │   ├── deploy-local.js         # Local: deploys + registers + allocates 5 agents, writes somnia-local.json
+│   │   ├── deploy.js               # Testnet: deploys all 6 UUPS proxies, registers + allocates agents
+│   │   ├── upgrade.js              # Testnet/local: upgrades proxy implementations (address unchanged)
+│   │   ├── platform-daemon.js      # Local: fires MockPlatform price + LLM callbacks
+│   │   ├── test-local.js           # Local: one-shot smoke test for the full decision cycle
+│   │   └── verify.js               # Testnet: sanity-check live contracts
 │   └── deployments/
-│       ├── somnia-local.json    # local addresses + ABIs + agent PKs (auto-generated by deploy-local.js)
-│       └── somnia-testnet.json  # testnet addresses + ABIs (auto-generated by deploy.js — not committed)
-├── backend/                # Python FastAPI
-│   ├── main.py                  # FastAPI app entry point, lifespan, router registration
-│   │                            # calls validate_settings() before startup — hard-exits on bad/missing PKs
-│   ├── config.py                # Pydantic Settings: loads .env; no usable PK defaults
-│   │                            # validate_settings(): on non-localhost, exits if any PK is empty/invalid
-│   ├── .env.example             # ← committed template: copy to .env and fill in values (no secrets here)
+│       ├── somnia-local.json        # Local addresses + ABIs (no PKs — only deployer key needed)
+│       └── somnia-testnet.json      # Testnet addresses + ABIs
+├── backend/
+│   ├── main.py                      # FastAPI entry point, lifespan, router registration
+│   ├── config.py                    # Pydantic Settings — only DEPLOYER_PRIVATE_KEY required
+│   │                                # validate_settings() exits if deployer key missing/invalid
 │   ├── agents/
-│   │   ├── orchestrator.py      # AGENT_CONFIGS (5 system agents), startup triggers, task wiring,
-│   │   │                        # _noise_trader_loop(), _load_local_deployment(),
-│   │   │                        # _on_user_agent_registered() → auto-starts loop,
-│   │   │                        # _reload_user_agents_from_db() on startup
-│   │   ├── metrics_collector.py # Trade poll (1s) + chain metrics (5s): coordinator events, exchange
-│   │   │                        # metrics, treasury balances, P&L tracking, risk warnings
-│   │   ├── token_replenisher.py # QUOTE/AGT balance polling + auto-mint every 30s
-│   │   ├── watchdog.py          # AgentWatchdog: stall detection + re-trigger with fresh nonce
-│   │   └── user_agents_db.py    # JSON cache of user agents at backend/data/user_agents.json (no keys)
+│   │   ├── orchestrator.py          # AGENT_CONFIGS (5 system agents, no PKs),
+│   │   │                            # startup triggers (all 5 via deployer key),
+│   │   │                            # _on_user_agent_registered() → allocateToAgent + triggerAgentDecision,
+│   │   │                            # _reload_user_agents_from_db() on restart
+│   │   ├── metrics_collector.py     # Trade poll (1s) + chain metrics (5s): P&L, per-agent stats
+│   │   ├── token_replenisher.py     # Coordinator pool top-up only (30s) — no per-agent wallet checks
+│   │   ├── watchdog.py              # Stall detection + re-trigger for all 5 agents
+│   │   └── user_agents_db.py        # JSON cache at backend/data/user_agents.json
 │   ├── market/
-│   │   ├── state_bus.py         # async-safe shared state (price, order book, events)
-│   │   ├── price_engine.py      # GBM price simulation + OHLCV builder
-│   │   ├── price_feed.py        # CoinGecko ETH/USD feed (reference price)
-│   │   └── order_book.py        # in-memory order book reconstruction from on-chain data
+│   │   ├── state_bus.py             # Async-safe shared market state
+│   │   ├── price_engine.py          # GBM simulation + OHLCV builder
+│   │   ├── price_feed.py            # CoinGecko ETH/USD reference price
+│   │   └── order_book.py            # In-memory order book reconstruction
 │   ├── blockchain/
-│   │   ├── client.py            # Web3 singleton, per-wallet nonce Lock, send_transaction(), refresh_nonce()
-│   │   ├── abis.py              # fallback ABI definitions (readable multiline format)
-│   │   └── contracts.py         # _BaseContract + typed wrappers: ExchangeContract, TreasuryContract,
-│   │                            # AgentCoordinatorContract, AgentRegistryContract,
-│   │                            # AgentTokenContract, QuoteTokenContract
-│   ├── api/
-│   │   ├── websocket_hub.py     # ConnectionManager: broadcast to all clients
-│   │   ├── routes_ws.py         # /ws WebSocket endpoint
-│   │   ├── auth.py              # MetaMask wallet-signature auth (personal_sign + eth_account recovery)
-│   │   ├── routes_http.py       # REST endpoints (/health, /state, /agents, /chain-metrics,
-│   │   │                        # /events/inject, /agents/{id}/pause, /agents/{id}/resume, etc.)
-│   │   └── routes_user_agents.py# GET /user/agents?address=0x... — returns cached user agents + live metrics
-│   └── tests/
-│       ├── test_order_book.py   # in-memory order book: placement, matching, cancellation
-│       ├── test_price_engine.py # GBM tick, shock, volatility multiplier, OHLCV builder
-│       └── test_state_bus.py    # MarketStateBus: concurrent access, snapshot, fills
-└── frontend/               # Next.js 14
-    ├── app/
-    │   ├── page.tsx             # root page — assembles all dashboard panels
-    │   ├── layout.tsx           # root layout + font loading
-    │   └── providers.tsx        # client-side provider wrapper
-    ├── components/
-    │   ├── layout/
-    │   │   ├── LatencyHero.tsx  # full-width latency comparison: Somnia vs Solana vs Ethereum
-    │   │   ├── ActivityFeed.tsx # activity feed with coalition alerts + explorer tx hash links
-    │   │   └── Header.tsx       # top nav with connection status
-    │   ├── chart/
-    │   │   ├── CandlestickChart.tsx  # TradingView Lightweight Charts v5
-    │   │   ├── OrderBook.tsx         # live bid/ask depth display
-    │   │   └── RecentTrades.tsx      # last 50 fills with agent labels
-    │   ├── agents/
-    │   │   ├── AgentGrid.tsx         # 5-agent card layout
-    │   │   ├── AgentCard.tsx         # strategy desc, streak badge, position, P&L
-    │   │   ├── AgentScoreboard.tsx   # ranked by total P&L (realized + unrealized)
-    │   │   ├── AgentStatusBadge.tsx  # ACTIVE / WAITING / STOPPED status pill
-    │   │   ├── ReasoningPanel.tsx    # live LLM prompt (peers + streak) per agent
-    │   │   ├── MyAgentsPanel.tsx     # wallet-gated panel: user's agents + create button
-    │   │   ├── UserAgentCard.tsx     # user agent card with PAUSE / RESUME / FUND controls
-    │   │   ├── CreateAgentModal.tsx  # two-step modal: define prompt → fund with STT
-    │   │   ├── AdminPanel.tsx        # deployer-only bulk pause/resume/fund panel
-    │   │   └── AdminAgentRow.tsx     # single-agent row within AdminPanel (per-agent controls)
-    │   └── ui/                  # shadcn/ui primitives: badge, button, card, separator
-    ├── store/
-    │   ├── marketStore.ts       # Zustand: candles, order book, recent trades, current price
-    │   ├── agentStore.ts        # Zustand: per-agent state, coordinator balance, coalition alerts
-    │   ├── feedStore.ts         # Zustand: activity feed ring buffer (max 100)
-    │   └── userStore.ts         # Zustand: connected wallet address (shared Header → page)
+│   │   ├── client.py                # Web3 singleton, nonce Lock, send_transaction()
+│   │   ├── abis.py                  # Fallback ABI definitions
+│   │   └── contracts.py             # Typed contract wrappers including allocate_to_agent(),
+│   │                                # get_user_stt_balance(), place_order_for_agent()
+│   └── api/
+│       ├── websocket_hub.py
+│       ├── routes_ws.py
+│       ├── auth.py                  # MetaMask personal_sign admin auth
+│       ├── routes_http.py           # REST: health, agents, chain-metrics, pause/resume/fund
+│       └── routes_user_agents.py    # GET /user/agents?address=0x...
+└── frontend/
+    ├── components/agents/
+    │   ├── CreateAgentModal.tsx      # 2-step: define (prompt/icon/risk) → fund STT
+    │   ├── UserAgentCard.tsx         # PAUSE / RESUME / FUND controls
+    │   ├── MyAgentsPanel.tsx         # Wallet-gated user agent panel
+    │   ├── AgentCard.tsx             # System agent card with streak badge + P&L
+    │   ├── AgentScoreboard.tsx       # All agents ranked by realized + unrealized P&L
+    │   └── AdminPanel.tsx            # Deployer-only bulk controls
     ├── hooks/
-    │   ├── useWebSocket.ts      # WS connect/reconnect + message dispatch to stores
-    │   ├── useAdminActions.ts   # wallet connect (MetaMask), sign-and-post for admin controls
-    │   └── useUserAgents.ts     # user agent CRUD: createAgent → registerUserAgent() on-chain
-    │                            # pauseAgent/resumeAgent/fundAgent → direct MetaMask txs
-    ├── types/
-    │   └── global.d.ts          # EthereumProvider interface + window.ethereum type extension
-    └── lib/
-        ├── types.ts             # shared TypeScript types (AgentState, UserAgentRecord, Candle, …)
-        └── utils.ts             # shadcn cn() helper
+    │   ├── useUserAgents.ts          # createAgent → registerAgent() on-chain
+    │   │                             # fundAgent → coordinator.fund() (sets userSttBalance)
+    │   └── useAdminActions.ts        # Admin MetaMask sign-and-post
+    └── store/
+        ├── marketStore.ts / agentStore.ts / feedStore.ts / userStore.ts
 ```
 
-**To change system agent behavior:** update the `PROMPTS` object in `contracts/scripts/deploy-local.js` (local) or the `prompts` array in `deploy.js` (testnet) and redeploy.  
-**To add/remove system agents:** edit `AGENT_CONFIGS` in `backend/agents/orchestrator.py`.  
-**To create a user agent programmatically:** call `AgentRegistry.registerAgent(agentId, name, icon, riskLevel, systemPrompt, priceUrl, selector, decimals)` from any wallet.  
-**Token economics:** sETH (synthetic ETH on Somnia) is the traded asset; USDC is the payment currency. Coordinator holds 10M sETH + 10M USDC at deploy. The orchestrator auto-mints USDC to coordinator and noise_trader when balances fall below 1,000 USDC. sETH/USDC price is determined by order book activity — agents use the on-chain `lastTradePrice` as their order reference, seeding from the ETH/USD oracle only on first run.
+**To change system agent behavior:** update `PROMPTS` in `contracts/scripts/deploy-local.js` (local) or `deploy.js` (testnet) and redeploy.  
+**Noise trader behavior:** controlled by `_executeRuleDecision` in `AgentCoordinator.sol` — compares active buy vs sell order counts; BUYs when asks outnumber bids, SELLs when bids outnumber asks, random when balanced. Registered with empty `systemPrompt` in the registry.  
+**Token economics:** 50K sETH + 50K USDC minted to coordinator (5 agents × 10K each). Token replenisher auto-mints to the coordinator pool when total balance drops below 1,000. sETH/USDC price is determined by order book activity.
 
 ---
 
 ## Troubleshooting
 
-| Symptom                                                              | Cause                                                                 | Fix                                                                                                                                                                                               |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backend exits immediately with `[config] Missing or invalid secrets` | One or more private keys not set in `backend/.env` (testnet only)     | Copy `backend/.env.example` to `backend/.env` and fill in all 6 private keys; on localhost this check is skipped (keys auto-load from `somnia-local.json`)                                        |
-| Chart blank on load                                                  | Backend not running or WS URL wrong                                   | Check `NEXT_PUBLIC_WS_URL` in `frontend/.env.local`; verify backend at `http://localhost:8000/health`                                                                                             |
-| No tx hashes visible                                                 | Contracts not deployed                                                | Complete the deployment steps above                                                                                                                                                               |
-| `deploy.js` / `deploy-local.js` fails                                | Placeholder PK or insufficient funds                                  | Verify `DEPLOYER_PRIVATE_KEY` is a real key with STT (testnet) or that `npx hardhat node` is running (local)                                                                                      |
-| `start.sh` exits with "Hardhat node not running"                     | Forgot to start `npx hardhat node`                                    | Open a terminal, run `cd contracts && npx hardhat node`, then re-run `./start.sh`                                                                                                                 |
-| Agent cards show zeros after startup                                 | Contracts not configured or still warming up                          | Wait 10s for first coordinator poll; check `/debug/config` endpoint to confirm addresses loaded                                                                                                   |
-| `/chain-metrics` returns all zeros                                   | `AGENT_COORDINATOR_ADDRESS` not set                                   | Check `backend/.env` — if using local dev, `somnia-local.json` auto-loads addresses                                                                                                               |
-| `LoopStopped` events in chain-metrics                                | Coordinator ran out of STT                                            | Call `AgentCoordinator.fund()` with more STT; then POST to `/agents/trigger` to restart loops                                                                                                     |
-| platform-daemon not started                                          | Running without tmux or manually                                      | Run `cd contracts && node scripts/platform-daemon.js` in a separate terminal                                                                                                                      |
-| Frontend WS disconnect loop                                          | Backend crash                                                         | Check backend logs via `tmux attach -t agentic-exchange`                                                                                                                                          |
-| Noise trader not placing orders                                      | `NOISE_TRADER_PK` not set in `.env`                                   | Add `NOISE_TRADER_PK=0x...` to `backend/.env`; for local dev it auto-loads from `somnia-local.json`                                                                                               |
-| Order book filling with stale orders                                 | Old coordinator without cancel-before-place                           | Recompile and redeploy contracts after pulling latest `AgentCoordinator.sol`                                                                                                                      |
-| No coalition alerts in dashboard                                     | Fewer than 3 directional agents configured                            | market_maker is non-directional; coalition requires 3 of momentum_trader/arbitrage_agent/risk_manager to agree                                                                                    |
-| `win_streak` stays 0 in agent cards                                  | HOLD decisions or failed placeOrder calls                             | Normal — streak resets on HOLD; check `DecisionFailed` events via `/chain-metrics`                                                                                                                |
-| SELL orders revert with "Token transfer failed"                      | Agent wallet has no sETH or Exchange not approved                     | Run `seed.js` again — it mints sETH and sets approval per wallet; for coordinator call `approveToken()`                                                                                           |
-| BUY orders revert with "QUOTE transfer failed"                       | Agent wallet has no USDC or Exchange USDC allowance not set           | Coordinator USDC is auto-replenished by orchestrator when below 1K; for noise_trader call `approveToken()` or wait for auto-top-up                                                                |
-| `seed.js` skips gas funding                                          | Agent wallet already above 0.01 STT                                   | Normal — script skips funding if balance is sufficient                                                                                                                                            |
-| Agent cards show zeros after redeploy                                | `backend/.env` has stale contract addresses                           | Copy addresses printed by `deploy-local.js` into `backend/.env`, or delete the address lines — `_load_local_deployment()` auto-loads from `somnia-local.json` when running against localhost      |
-| Noise trader gets "Insufficient balance" reverts                     | Noise trader wallet has no sETH tokens                                | Fixed in current `deploy-local.js` (mints 10K sETH + 10M USDC); if on an older deployment run `deploy-local.js` again                                                                             |
-| Daemon shows `NONCE_EXPIRED` / "nonce too low"                       | Another process used the same deployer key                            | Restart the daemon (`Ctrl+C` → `node scripts/platform-daemon.js`) so its `NonceManager` re-fetches the current nonce; ensure no other process signs with the deployer key while daemon is running |
-| sETH balance shows 0 for all agents                                  | On-chain agents hold sETH in the coordinator, not their wallets       | Expected — coordinator holds the shared 10M pool. Dashboard shows coordinator's sETH balance for on-chain agents                                                                                  |
-| P&L / orders show 0 for on-chain agents                              | AgentCoordinator is `msg.sender` for Exchange, not individual wallets | Fixed — backend now tracks `DecisionExecuted.orderId → agentId` via `_order_to_agent` mapping                                                                                                     |
-| Admin control buttons (PAUSE ALL etc.) not visible                   | Deployer wallet not connected or address mismatch                     | Click CONNECT WALLET in the header; ensure `NEXT_PUBLIC_DEPLOYER_ADDRESS` matches the deployer public key                                                                                         |
-| `POST /agents/{id}/pause` returns 403                                | Missing or invalid MetaMask signature headers                         | Admin endpoints require a `personal_sign` signature; use the dashboard PAUSE/RESUME buttons or sign manually                                                                                      |
-| MY AGENTS tab shows wallet-gated message                             | Wallet not connected                                                  | Click CONNECT in the header first; the tab shows your agents once a wallet address is detected                                                                                                    |
-| MY AGENTS tab empty after creating agent                             | Backend hasn't polled `AgentOwnerSet` event yet                       | Wait ~5s for the contract metrics poll loop to pick up the event; click the refresh button in the tab                                                                                             |
-| `registerAgent` tx reverts                                           | Agent ID already taken                                                | The `agentId` string must be unique; the modal generates a random suffix — try again                                                                                                              |
-| User agent shows WAITING and never goes ACTIVE                       | Coordinator underfunded                                               | Fund the coordinator via the FUND button on the agent card; each LLM cycle costs 2 deposits in STT                                                                                                |
-| `registry.pauseAgent` reverts for user agent                         | Calling from wrong wallet                                             | Only the wallet that called `registerAgent()` can pause that agent (`agentOwner` check in `AgentRegistry`)                                                                                        |
-| `NEXT_PUBLIC_REGISTRY_ADDRESS` not set                               | Missing env var in `frontend/.env.local`                              | Copy the address printed by `deploy-local.js` — it is the `AgentRegistry` address                                                                                                                 |
-| `NEXT_PUBLIC_COORDINATOR_ADDRESS` not set                            | Missing env var in `frontend/.env.local`                              | Copy the address printed by `deploy-local.js` — needed for `fund()` calls only                                                                                                                    |
-| System agents not starting after contract change                     | Old deployment — `somnia-local.json` is stale                         | Run `npx hardhat node` (fresh) then `npx hardhat run scripts/deploy-local.js --network localhost`                                                                                                 |
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Backend exits with `[config] Missing or invalid secrets` | `DEPLOYER_PRIVATE_KEY` not set (testnet only) | Copy `.env.example` to `.env` and fill in deployer key |
+| Agent shows "Insufficient STT" and loop stops | User's STT pool depleted | Call `coordinator.fund()` with more STT from the agent owner's wallet |
+| User agent never starts after creation | `allocateToAgent` failed or coordinator underfunded | Check backend logs; ensure coordinator has token balance; user must also fund STT |
+| Noise trader not placing orders | Rule decision failing due to zero virtual balance | Ensure deploy script called `allocateToAgent("noise_trader", ...)` |
+| Chart blank on load | Backend not running or WS URL wrong | Check `NEXT_PUBLIC_WS_URL`; verify backend at `http://localhost:8000/health` |
+| `deploy-local.js` fails | Hardhat node not running or insufficient funds | Start `npx hardhat node` first |
+| Agent cards show zeros after startup | Contracts not configured or warming up | Wait 10s; check `/debug/config` endpoint |
+| `LoopStopped` events for a user agent | User's STT balance exhausted | Fund via FUND button on agent card |
+| Coalition alerts missing | Fewer than 3 directional agents agree | Normal — market_maker is non-directional; needs 3 of momentum/arb/risk to agree |
+| MY AGENTS tab empty after creating agent | Backend hasn't detected `AgentRegistered` event yet | Wait ~5s for metrics poll loop |
+| `registerAgent` tx reverts | Agent ID already taken | Modal generates random suffix — try again |
+| `pauseAgent` reverts for user agent | Calling from wrong wallet | Only the wallet that called `registerAgent()` can pause |
+| sETH balance shows 0 for all agents | On-chain agents share coordinator pool, no individual wallets | Expected — dashboard shows virtual balance per agent via `agentTokenBalance` |
 
 ---
 
@@ -518,14 +397,14 @@ somnia_hackathon/
 | **Explorer** | https://shannon-explorer.somnia.network |
 | **Faucet**   | https://testnet.somnia.network/         |
 
-> Gas price is hardcoded at **6 gwei** throughout the codebase. Do not use dynamic gas estimation — it causes tx failures on Somnia testnet.
+> Gas price is hardcoded at **6 gwei** throughout the codebase.
 
 ---
 
 ## Docs
 
-- [Architecture](docs/ARCHITECTURE.md) — system design, data flow, component internals
-- [Demo Script](docs/DEMO_SCRIPT.md) — 5-minute judge walkthrough with talking points
-- [Backend](docs/BACKEND.md) — FastAPI + LangGraph internals, config reference, agent tuning
-- [Frontend](docs/FRONTEND.md) — Next.js components, Zustand stores, WS dispatch, TradingView notes
+- [Architecture](docs/ARCHITECTURE.md) — system design, data flow, accounting model, component internals
 - [Contracts](docs/CONTRACTS.md) — Solidity reference, deployment walkthrough, script docs
+- [Backend](docs/BACKEND.md) — FastAPI internals, config reference, agent tuning
+- [Frontend](docs/FRONTEND.md) — Next.js components, Zustand stores, WS dispatch
+- [Demo Script](docs/DEMO_SCRIPT.md) — 5-minute judge walkthrough

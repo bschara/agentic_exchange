@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { UserAgentRecord, AgentState, AgentStatus } from '@/lib/types';
 import { AgentStatusBadge } from './AgentStatusBadge';
-import { PauseCircle, PlayCircle, Coins } from 'lucide-react';
+import { PauseCircle, PlayCircle } from 'lucide-react';
 
 const DECISION_COLORS: Record<string, string> = {
   BUY:  'text-emerald-400',
@@ -15,7 +15,7 @@ function agentStatus(metrics?: AgentState): AgentStatus {
   if (!metrics) return 'WAITING';
   if (metrics.loop_stopped) return 'STOPPED';
   if (metrics.decisions_total > 0 || metrics.orders_placed > 0) return 'ACTIVE';
-  return 'WAITING';
+  return 'STARTING';
 }
 
 interface Props {
@@ -29,7 +29,6 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
   const m = agent.metrics;
   const status = agentStatus(m);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [fundAmount, setFundAmount] = useState('0.1');
   const [txMsg, setTxMsg] = useState<string | null>(null);
 
   const total      = m?.decisions_total || 1;
@@ -58,7 +57,7 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="text-lg">{agent.icon ?? '🤖'}</span>
+          <span className="text-lg">{agent.icon || '🤖'}</span>
           <div className="flex flex-col gap-0.5">
             <div className="flex items-center gap-1.5">
               <span className="text-sm font-bold text-white">{agent.name}</span>
@@ -93,28 +92,42 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
         Strategy: <span className="text-gray-400 italic">AI-defined (on-chain)</span>
       </p>
 
-      {/* Stats row */}
+      {/* Stats — balances row */}
       {m && (
-        <div className="grid grid-cols-4 gap-1.5 text-center">
-          <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">sETH</p>
-            <p className="text-[10px] font-mono font-bold text-white">{(m.agt_balance ?? 0).toFixed(2)}</p>
+        <>
+          <div className="grid grid-cols-2 gap-1.5 text-center">
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">sETH</p>
+              <p className="text-[10px] font-mono font-bold text-white">{(m.agt_balance ?? 0).toFixed(4)}</p>
+            </div>
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">USDC</p>
+              <p className="text-[10px] font-mono font-bold text-cyan-300">{(m.quote_balance ?? 0).toFixed(2)}</p>
+            </div>
           </div>
-          <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">Last</p>
-            <p className={`text-[10px] font-mono font-bold ${lastColor}`}>{m.last_decision ?? '—'}</p>
+
+          {/* Stats — activity row */}
+          <div className="grid grid-cols-4 gap-1.5 text-center">
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">Orders</p>
+              <p className="text-[10px] font-mono font-bold text-white">{m.orders_placed ?? 0}</p>
+            </div>
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">Decisions</p>
+              <p className="text-[10px] font-mono font-bold text-white">{m.decisions_total}</p>
+            </div>
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">Last</p>
+              <p className={`text-[10px] font-mono font-bold ${lastColor}`}>{m.last_decision ?? '—'}</p>
+            </div>
+            <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
+              <p className="text-[10px] text-gray-500">P&L</p>
+              <p className={`text-[10px] font-mono font-bold ${(m.trade_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {(m.trade_pnl ?? 0) >= 0 ? '+' : ''}{(m.trade_pnl ?? 0).toFixed(4)}
+              </p>
+            </div>
           </div>
-          <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">Decisions</p>
-            <p className="text-[10px] font-mono font-bold text-white">{m.decisions_total}</p>
-          </div>
-          <div className="bg-white/5 rounded-lg px-1.5 py-1.5">
-            <p className="text-[10px] text-gray-500">P&L</p>
-            <p className={`text-[10px] font-mono font-bold ${(m.trade_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {(m.trade_pnl ?? 0) >= 0 ? '+' : ''}{(m.trade_pnl ?? 0).toFixed(4)}
-            </p>
-          </div>
-        </div>
+        </>
       )}
 
       {/* BUY/SELL/HOLD bar */}
@@ -148,23 +161,17 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
           </button>
         )}
         <div className="flex items-center gap-1 ml-auto">
-          <input
-            type="number"
-            min="0.001"
-            step="0.01"
-            value={fundAmount}
-            onChange={(e) => setFundAmount(e.target.value)}
-            className="w-14 px-1.5 py-1 text-[10px] font-mono bg-black/40 border border-white/10 rounded text-white text-center"
-          />
-          <span className="text-[10px] text-gray-600">STT</span>
-          <button
-            onClick={() => handle('fund', () => onFund(parseFloat(fundAmount) || 0.1))}
-            disabled={!!actionLoading}
-            className="flex items-center gap-1 px-2 py-1 text-[10px] font-bold border border-blue-500/40 text-blue-400 rounded bg-blue-500/10 hover:bg-blue-500/20 disabled:opacity-40 transition-all"
-          >
-            <Coins className="w-3 h-3" />
-            {actionLoading === 'fund' ? '...' : 'FUND'}
-          </button>
+          {([0.1, 0.5, 1.0] as const).map((amt) => (
+            <button
+              key={amt}
+              onClick={() => handle(`fund_${amt}`, () => onFund(amt))}
+              disabled={!!actionLoading}
+              className="px-2 py-1 text-[10px] font-mono font-bold border border-violet-500/30 text-violet-300 rounded bg-violet-500/10 hover:bg-violet-500/20 disabled:opacity-40 transition-all"
+            >
+              {actionLoading === `fund_${amt}` ? '...' : `+${amt}`}
+            </button>
+          ))}
+          <span className="text-[9px] text-gray-600 ml-0.5">STT</span>
         </div>
       </div>
 

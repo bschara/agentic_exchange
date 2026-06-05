@@ -1,6 +1,7 @@
 import '@nomicfoundation/hardhat-ethers';
 import '@nomicfoundation/hardhat-chai-matchers';
 import '@nomicfoundation/hardhat-network-helpers';
+import '@openzeppelin/hardhat-upgrades';
 import { config as dotenvConfig } from 'dotenv';
 dotenvConfig();
 
@@ -13,7 +14,7 @@ function getAccounts() {
 /** @type import('hardhat/config').HardhatUserConfig */
 export default {
   solidity: {
-    version: '0.8.20',
+    version: '0.8.22',
     settings: {
       optimizer: { enabled: true, runs: 200 },
       viaIR: true,

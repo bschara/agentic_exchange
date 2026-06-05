@@ -1,12 +1,22 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
+
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
 }
 
-contract Exchange {
+// Implemented by AgentCoordinator to receive per-agent fill/cancel accounting updates.
+// tokenFill = sETH quantity actually exchanged; quoteFill = USDC quantity actually exchanged.
+interface IAgentFillCallback {
+    function onAgentFill(string calldata agentId, bool isBuy, uint256 tokenFill, uint256 quoteFill) external;
+    function onAgentCancel(string calldata agentId, bool isBuy, uint256 unfilledTokens, uint256 remainingQuote) external;
+}
+
+contract Exchange is Initializable, UUPSUpgradeable {
     struct Order {
         uint256 id;
         address agent;
@@ -33,16 +43,23 @@ contract Exchange {
     IERC20 public quoteToken;
     address public exchangeOwner;
 
-    uint256 private _nextOrderId = 1;
-    uint256 private _nextTradeId = 1;
+    uint256 private _nextOrderId;
+    uint256 private _nextTradeId;
 
     // QUOTE locked per BUY order — released to seller on fill, refunded on cancel
     mapping(uint256 => uint256) private _lockedQuote;
 
-    constructor(address _token, address _quoteToken) {
-        token = IERC20(_token);
-        quoteToken = IERC20(_quoteToken);
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address _token, address _quoteToken) external initializer {
+        token         = IERC20(_token);
+        quoteToken    = IERC20(_quoteToken);
         exchangeOwner = msg.sender;
+        _nextOrderId  = 1;
+        _nextTradeId  = 1;
     }
 
     // Last matched trade price — read by Python backend for real price discovery
@@ -57,6 +74,10 @@ contract Exchange {
 
     // Per-agent order history — used to enumerate active orders by agent address
     mapping(address => uint256[]) private _agentOrderIds;
+
+    // agentId string per order — non-empty only for orders placed via placeOrderForAgent.
+    // Triggers fill/cancel callbacks back to the placing address (coordinator).
+    mapping(uint256 => string) private _orderAgentId;
 
     event OrderPlaced(uint256 indexed orderId, address indexed agent, bool isBuy, uint256 price, uint256 amount);
     event OrderCancelled(uint256 indexed orderId, address indexed agent);
@@ -74,6 +95,26 @@ contract Exchange {
     // ── Placing orders ──────────────────────────────────────────────────────────
 
     function placeOrder(bool isBuy, uint256 price, uint256 amount) external returns (uint256 orderId) {
+        orderId = _placeOrder(isBuy, price, amount, "");
+    }
+
+    // Like placeOrder but records agentId so fill/cancel events are fed back to the
+    // coordinator's onAgentFill / onAgentCancel for per-agent balance accounting.
+    function placeOrderForAgent(
+        bool isBuy,
+        uint256 price,
+        uint256 amount,
+        string calldata agentId
+    ) external returns (uint256 orderId) {
+        orderId = _placeOrder(isBuy, price, amount, agentId);
+    }
+
+    function _placeOrder(
+        bool isBuy,
+        uint256 price,
+        uint256 amount,
+        string memory agentId
+    ) internal returns (uint256 orderId) {
         require(price > 0, "Price must be > 0");
         require(amount > 0, "Amount must be > 0");
 
@@ -89,6 +130,10 @@ contract Exchange {
             active: true
         });
         _agentOrderIds[msg.sender].push(orderId);
+
+        if (bytes(agentId).length > 0) {
+            _orderAgentId[orderId] = agentId;
+        }
 
         if (isBuy) {
             uint256 quoteAmount = price * amount / 1e18;
@@ -187,15 +232,24 @@ contract Exchange {
             _removeFromBook(_activeSellIds, orderId);
         }
 
+        uint256 unfilledTokens = 0;
+        uint256 remainingQuote = 0;
+
         if (order.isBuy) {
-            uint256 locked = _lockedQuote[orderId];
-            if (locked > 0) {
+            remainingQuote = _lockedQuote[orderId];
+            if (remainingQuote > 0) {
                 _lockedQuote[orderId] = 0;
-                require(quoteToken.transfer(order.agent, locked), "QUOTE refund failed");
+                require(quoteToken.transfer(order.agent, remainingQuote), "QUOTE refund failed");
             }
         } else {
-            uint256 remaining = order.amount - order.filled;
-            if (remaining > 0) require(token.transfer(order.agent, remaining), "sETH refund failed");
+            unfilledTokens = order.amount - order.filled;
+            if (unfilledTokens > 0) require(token.transfer(order.agent, unfilledTokens), "sETH refund failed");
+        }
+
+        // Notify coordinator so it can restore the agent's virtual balance.
+        string memory agentId = _orderAgentId[orderId];
+        if (bytes(agentId).length > 0) {
+            try IAgentFillCallback(order.agent).onAgentCancel(agentId, order.isBuy, unfilledTokens, remainingQuote) {} catch {}
         }
 
         emit OrderCancelled(orderId, msg.sender);
@@ -294,23 +348,42 @@ contract Exchange {
 
         emit TradeExecuted(tradeId, buyId, sellId, buyer, seller, fillPrice, fill);
 
+        // Compute exact USDC amount before any transfers so callbacks receive accurate figures.
+        // Proportional drain; last fill takes all remaining locked to eliminate dust.
+        uint256 totalLocked = _lockedQuote[buyId];
+        uint256 quoteForFill = 0;
+        if (totalLocked > 0) {
+            quoteForFill = (orders[buyId].filled >= orders[buyId].amount)
+                ? totalLocked
+                : totalLocked * fill / orders[buyId].amount;
+        }
+
+        // Notify coordinator with exact tokenFill + quoteFill so virtual balances stay accurate.
+        // try/catch ensures a failing callback never reverts the trade.
+        string memory buyAgentId = _orderAgentId[buyId];
+        if (bytes(buyAgentId).length > 0) {
+            try IAgentFillCallback(buyer).onAgentFill(buyAgentId, true, fill, quoteForFill) {} catch {}
+        }
+        string memory sellAgentId = _orderAgentId[sellId];
+        if (bytes(sellAgentId).length > 0) {
+            try IAgentFillCallback(seller).onAgentFill(sellAgentId, false, fill, quoteForFill) {} catch {}
+        }
+
         // sETH to buyer (from seller's escrow)
         require(token.transfer(buyer, fill), "sETH transfer failed");
 
-        // QUOTE to seller — proportional to fill; drain remainder on last fill to avoid dust
-        uint256 totalLocked = _lockedQuote[buyId];
-        if (totalLocked > 0) {
-            uint256 quoteForFill = (orders[buyId].filled >= orders[buyId].amount)
-                ? totalLocked
-                : totalLocked * fill / orders[buyId].amount;
-            if (quoteForFill > 0) {
-                _lockedQuote[buyId] -= quoteForFill;
-                require(quoteToken.transfer(seller, quoteForFill), "QUOTE transfer failed");
-            }
+        // QUOTE to seller
+        if (quoteForFill > 0) {
+            _lockedQuote[buyId] -= quoteForFill;
+            require(quoteToken.transfer(seller, quoteForFill), "QUOTE transfer failed");
         }
     }
 
     // ── Emergency recovery (owner-only) ─────────────────────────────────────────
+
+    function _authorizeUpgrade(address) internal view override {
+        require(msg.sender == exchangeOwner, "Not owner");
+    }
 
     function emergencyWithdrawToken(address tokenAddr, uint256 amount) external {
         require(msg.sender == exchangeOwner, "Not owner");

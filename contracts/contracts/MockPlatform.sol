@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
 // Local stand-in for the Somnia IAgentRequester platform.
 // Replaces the live platform at 0x037B... so contracts can be tested on a local Hardhat node.

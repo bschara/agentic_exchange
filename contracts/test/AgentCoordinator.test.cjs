@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
@@ -11,34 +11,68 @@ const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 //   simulatePriceCallback  → createRequest → reqId=2  (LLM inference)
 //   simulateLLMCallback    → _retrigger    → reqId=3  (next price fetch)
 
+const PRICE_URL = "https://api.example.com/eth";
+const PRICE_SELECTOR = "$.price";
 const AGENT_ID = "agent1";
 
 describe("AgentCoordinator", function () {
   async function deployFixture() {
     const [owner, stranger] = await ethers.getSigners();
 
-    const platform    = await ethers.deployContract("MockPlatform");
-    const token       = await ethers.deployContract("AgentToken", ["Test Token", "TST"]);
-    const exchange    = await ethers.deployContract("Exchange", [await token.getAddress()]);
-    const coordinator = await ethers.deployContract("AgentCoordinator", [
-      await platform.getAddress(),
-      await exchange.getAddress(),
-      1n, // llmAgentId
-      2n, // jsonApiAgentId
-    ]);
+    const platform   = await ethers.deployContract("MockPlatform");
+    const platformAddr = await platform.getAddress();
+    const tokenF     = await ethers.getContractFactory("AgentToken");
+    const token      = await upgrades.deployProxy(tokenF, ["Test Token", "TST"], { kind: "transparent", initializer: "initialize" });
+    await token.waitForDeployment();
+    const quoteF     = await ethers.getContractFactory("QuoteToken");
+    const quoteToken = await upgrades.deployProxy(quoteF, [], { kind: "transparent", initializer: "initialize" });
+    await quoteToken.waitForDeployment();
+    const exchangeF  = await ethers.getContractFactory("Exchange");
+    const exchange   = await upgrades.deployProxy(exchangeF, [await token.getAddress(), await quoteToken.getAddress()], { kind: "transparent", initializer: "initialize" });
+    await exchange.waitForDeployment();
 
-    // Mint AGT to coordinator and approve Exchange so SELL orders don't revert
-    await token.mint(await coordinator.getAddress(), ethers.parseEther("1000000"));
-    await coordinator.approveToken(
-      await token.getAddress(),
-      await exchange.getAddress(),
-      ethers.MaxUint256
+    // Deploy coordinator as an upgradeable proxy (Initializable pattern)
+    const CoordinatorFactory = await ethers.getContractFactory("AgentCoordinator");
+    const coordinator = await upgrades.deployProxy(
+      CoordinatorFactory,
+      [owner.address, 1n, 2n],
+      { kind: "transparent", constructorArgs: [platformAddr, await exchange.getAddress()], initializer: "initialize" }
+    );
+    await coordinator.waitForDeployment();
+
+    // Deploy registry pointing at coordinator, then wire it back
+    const RegistryFactory = await ethers.getContractFactory("AgentRegistry");
+    const registry = await upgrades.deployProxy(
+      RegistryFactory,
+      [owner.address, await coordinator.getAddress()],
+      { kind: "transparent", initializer: "initialize" }
+    );
+    await registry.waitForDeployment();
+    await coordinator.setRegistry(await registry.getAddress());
+
+    // Register the test agent via registry (config stored there, coordinator reads it)
+    await registry.registerAgent(
+      AGENT_ID, "Test Agent", "🤖", 3,
+      "Reply BUY, SELL, or HOLD.",
+      PRICE_URL, PRICE_SELECTOR, 0
     );
 
-    await coordinator.setAgentConfig(AGENT_ID, "https://api.example.com/eth", "$.price", 0);
-    await coordinator.setSystemPrompt(AGENT_ID, "Reply BUY, SELL, or HOLD.");
+    const coordAddr = await coordinator.getAddress();
+    const exchangeAddr = await exchange.getAddress();
 
-    return { coordinator, platform, exchange, token, owner, stranger };
+    // Mint sETH (SELL collateral) + QUOTE (BUY collateral) to coordinator and approve Exchange
+    await token.mint(coordAddr, ethers.parseEther("1000000"));
+    await quoteToken.mint(coordAddr, ethers.parseEther("1000000"));
+    await coordinator.approveToken(await token.getAddress(),      exchangeAddr, ethers.MaxUint256);
+    await coordinator.approveToken(await quoteToken.getAddress(), exchangeAddr, ethers.MaxUint256);
+
+    // Allocate virtual balances so handleDecision can place orders
+    await coordinator.allocateToAgent(
+      AGENT_ID, owner.address,
+      ethers.parseEther("10000"), ethers.parseEther("10000")
+    );
+
+    return { coordinator, registry, platform, exchange, token, quoteToken, owner, stranger };
   }
 
   // Stage 1: fires price fetch (reqId=1) then delivers price data (llmReqId=2).
@@ -47,23 +81,19 @@ describe("AgentCoordinator", function () {
     await platform.simulatePriceCallback(1n, price);
   }
 
-  describe("Configuration setters (onlyOwner)", function () {
-    it("setAgentConfig stores the config and reverts for non-owner", async function () {
-      const { coordinator, stranger } = await loadFixture(deployFixture);
-      const cfg = await coordinator.agentConfigs(AGENT_ID);
-      expect(cfg.priceUrl).to.equal("https://api.example.com/eth");
-      expect(cfg.selector).to.equal("$.price");
-      expect(cfg.decimals).to.equal(0);
-
-      await expect(coordinator.connect(stranger).setAgentConfig(AGENT_ID, "u", "s", 2))
-        .to.be.revertedWith("Not owner");
+  describe("Configuration (stored in AgentRegistry)", function () {
+    it("coordinator reads price config from registry", async function () {
+      const { coordinator, registry } = await loadFixture(deployFixture);
+      // Config is in the registry — verify coordinator can read it back
+      const [url, selector, decimals] = await registry.getPriceConfig(AGENT_ID);
+      expect(url).to.equal(PRICE_URL);
+      expect(selector).to.equal(PRICE_SELECTOR);
+      expect(decimals).to.equal(0);
     });
 
-    it("setSystemPrompt stores the prompt and reverts for non-owner", async function () {
-      const { coordinator, stranger } = await loadFixture(deployFixture);
-      expect(await coordinator.systemPrompts(AGENT_ID)).to.equal("Reply BUY, SELL, or HOLD.");
-      await expect(coordinator.connect(stranger).setSystemPrompt(AGENT_ID, "x"))
-        .to.be.revertedWith("Not owner");
+    it("coordinator reads system prompt from registry", async function () {
+      const { registry } = await loadFixture(deployFixture);
+      expect(await registry.getSystemPrompt(AGENT_ID)).to.equal("Reply BUY, SELL, or HOLD.");
     });
 
     it("setLlmAgentId updates the ID and reverts for non-owner", async function () {
@@ -118,10 +148,10 @@ describe("AgentCoordinator", function () {
       expect(pending.exists).to.be.true;
     });
 
-    it("reverts when no config is set for the agent", async function () {
+    it("reverts for an unregistered agent", async function () {
       const { coordinator } = await loadFixture(deployFixture);
       await expect(coordinator.triggerAgentDecision("unknown_agent"))
-        .to.be.revertedWith("No config for agent");
+        .to.be.revertedWith("Agent not registered");
     });
   });
 
@@ -207,9 +237,17 @@ describe("AgentCoordinator", function () {
 
   describe("market_maker special case", function () {
     it("posts both BUY and SELL orders around the fetched price, ignoring LLM content", async function () {
-      const { coordinator, platform, exchange } = await loadFixture(deployFixture);
+      const { coordinator, registry, platform, exchange, owner } = await loadFixture(deployFixture);
       const MM = "market_maker";
-      await coordinator.setAgentConfig(MM, "https://api.example.com/eth", "$.price", 0);
+      // Register market_maker via registry (config now lives there, not on coordinator)
+      await registry.connect(owner).registerAgent(
+        MM, "MM-Prime", "⚖️", 3, "Market maker strategy.",
+        PRICE_URL, PRICE_SELECTOR, 0
+      );
+      await coordinator.allocateToAgent(
+        MM, owner.address,
+        ethers.parseEther("10000"), ethers.parseEther("10000")
+      );
 
       await coordinator.triggerAgentDecision(MM); // reqId=1
       await platform.simulatePriceCallback(1n, 3000n); // llmReqId=2
@@ -284,25 +322,48 @@ describe("AgentCoordinator", function () {
     // Deploys with 3 directional agents so _coalitionCount can reach 3.
     async function deployThreeAgentFixture() {
       const [owner] = await ethers.getSigners();
-      const platform    = await ethers.deployContract("MockPlatform");
-      const token       = await ethers.deployContract("AgentToken", ["Test Token", "TST"]);
-      const exchange    = await ethers.deployContract("Exchange", [await token.getAddress()]);
-      const coordinator = await ethers.deployContract("AgentCoordinator", [
-        await platform.getAddress(),
-        await exchange.getAddress(),
-        1n, 2n,
-      ]);
-      await token.mint(await coordinator.getAddress(), ethers.parseEther("1000000"));
-      await coordinator.approveToken(
-        await token.getAddress(),
-        await exchange.getAddress(),
-        ethers.MaxUint256
+      const platform   = await ethers.deployContract("MockPlatform");
+      const tokenF     = await ethers.getContractFactory("AgentToken");
+      const token      = await upgrades.deployProxy(tokenF, ["Test Token", "TST"], { kind: "transparent", initializer: "initialize" });
+      await token.waitForDeployment();
+      const quoteF     = await ethers.getContractFactory("QuoteToken");
+      const quoteToken = await upgrades.deployProxy(quoteF, [], { kind: "transparent", initializer: "initialize" });
+      await quoteToken.waitForDeployment();
+      const exchangeF  = await ethers.getContractFactory("Exchange");
+      const exchange   = await upgrades.deployProxy(exchangeF, [await token.getAddress(), await quoteToken.getAddress()], { kind: "transparent", initializer: "initialize" });
+      await exchange.waitForDeployment();
+
+      const CoordFactory = await ethers.getContractFactory("AgentCoordinator");
+      const coordinator  = await upgrades.deployProxy(
+        CoordFactory,
+        [owner.address, 1n, 2n],
+        { kind: "transparent", constructorArgs: [await platform.getAddress(), await exchange.getAddress()], initializer: "initialize" }
       );
-      // Register 3 directional agents (no market_maker — it's non-directional)
-      await coordinator.setAgentConfig("agent1", "https://api.example.com/eth", "$.price", 0);
-      await coordinator.setAgentConfig("agent2", "https://api.example.com/eth", "$.price", 0);
-      await coordinator.setAgentConfig("agent3", "https://api.example.com/eth", "$.price", 0);
-      return { coordinator, platform, exchange, token, owner };
+      await coordinator.waitForDeployment();
+
+      const RegFactory = await ethers.getContractFactory("AgentRegistry");
+      const registry   = await upgrades.deployProxy(
+        RegFactory,
+        [owner.address, await coordinator.getAddress()],
+        { kind: "transparent", initializer: "initialize" }
+      );
+      await registry.waitForDeployment();
+      await coordinator.setRegistry(await registry.getAddress());
+
+      const coordAddr  = await coordinator.getAddress();
+      const exchangeAddr = await exchange.getAddress();
+      await token.mint(coordAddr, ethers.parseEther("1000000"));
+      await quoteToken.mint(coordAddr, ethers.parseEther("1000000"));
+      await coordinator.approveToken(await token.getAddress(),      exchangeAddr, ethers.MaxUint256);
+      await coordinator.approveToken(await quoteToken.getAddress(), exchangeAddr, ethers.MaxUint256);
+
+      // Register 3 directional agents and allocate virtual balances so lastDecision
+      // stays as BUY/SELL after order placement (not reset to HOLD on balance failure)
+      for (const id of ["agent1", "agent2", "agent3"]) {
+        await registry.registerAgent(id, id, "🤖", 3, "prompt", PRICE_URL, PRICE_SELECTOR, 0);
+        await coordinator.allocateToAgent(id, owner.address, ethers.parseEther("10000"), ethers.parseEther("10000"));
+      }
+      return { coordinator, registry, platform, exchange, token, owner };
     }
 
     it("emits CoalitionFormed when 3 agents all decide BUY", async function () {
@@ -366,10 +427,10 @@ describe("AgentCoordinator", function () {
         .to.be.revertedWith("Not owner");
     });
 
-    it("reverts when no config is set for the agent", async function () {
+    it("reverts for an unregistered agent", async function () {
       const { coordinator } = await loadFixture(deployFixture);
       await expect(coordinator.triggerWithPrice("unknown_agent", 3000n))
-        .to.be.revertedWith("No config for agent");
+        .to.be.revertedWith("Agent not registered");
     });
 
     it("subsequent handleDecision callback places an order using the injected price", async function () {

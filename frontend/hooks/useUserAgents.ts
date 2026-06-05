@@ -22,6 +22,7 @@ const REGISTRY_ABI = [
 ];
 const COORDINATOR_ABI = [
   'function fund() external payable',
+  'function getUserSttBalance(address owner) external view returns (uint256)',
 ];
 
 const registryIface    = new Interface(REGISTRY_ABI);
@@ -52,6 +53,7 @@ async function sendTx(from: string, to: string, data: string, value?: bigint): P
 
 export function useUserAgents(walletAddress: string | null) {
   const [agents, setAgents] = useState<UserAgentRecord[]>([]);
+  const [sttBalance, setSttBalance] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const liveAgents = useAgentStore((s) => s.agents);
@@ -64,7 +66,7 @@ export function useUserAgents(walletAddress: string | null) {
       const data = await res.json();
       const records: UserAgentRecord[] = (data.agents || []).map((r: UserAgentRecord) => ({
         ...r,
-        metrics: liveAgents[r.agent_id] ?? undefined,
+        metrics: liveAgents[r.agent_id] ?? r.metrics,
       }));
       setAgents(records);
     } catch (e) {
@@ -79,7 +81,21 @@ export function useUserAgents(walletAddress: string | null) {
     );
   }, [liveAgents]);
 
-  useEffect(() => { fetchAgents(); }, [fetchAgents]);
+  const fetchSttBalance = useCallback(async () => {
+    if (!walletAddress || !COORDINATOR_ADDRESS || !window.ethereum) return;
+    try {
+      const data = coordinatorIface.encodeFunctionData('getUserSttBalance', [walletAddress]);
+      const raw = await window.ethereum.request({
+        method: 'eth_call',
+        params: [{ to: COORDINATOR_ADDRESS, data }, 'latest'],
+      }) as string;
+      setSttBalance(Number(BigInt(raw)) / 1e18);
+    } catch (e) {
+      console.error('[useUserAgents] fetchSttBalance failed:', e);
+    }
+  }, [walletAddress]);
+
+  useEffect(() => { fetchAgents(); fetchSttBalance(); }, [fetchAgents, fetchSttBalance]);
 
   // ── On-chain actions ────────────────────────────────────────────────────────
 
@@ -155,7 +171,9 @@ export function useUserAgents(walletAddress: string | null) {
     setLoading(true);
     setError(null);
     try {
-      return await sendTx(walletAddress, COORDINATOR_ADDRESS, calldata, value);
+      const txHash = await sendTx(walletAddress, COORDINATOR_ADDRESS, calldata, value);
+      setTimeout(fetchSttBalance, 3000);
+      return txHash;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
@@ -163,7 +181,7 @@ export function useUserAgents(walletAddress: string | null) {
     } finally {
       setLoading(false);
     }
-  }, [walletAddress]);
+  }, [walletAddress, fetchSttBalance]);
 
-  return { agents, loading, error, createAgent, pauseAgent, resumeAgent, fundAgent, refetch: fetchAgents };
+  return { agents, sttBalance, loading, error, createAgent, pauseAgent, resumeAgent, fundAgent, refetch: fetchAgents, refreshSttBalance: fetchSttBalance };
 }

@@ -1,10 +1,8 @@
 # Architecture — Agentic Exchange
 
-Real-time autonomous trading demo on Somnia (chain 50312). Five system agents trade autonomously on-chain — four via Somnia's LLM consensus layer, one (noise_trader) as a pure Python random-order loop. Any user can also deploy their own **composable user agent** via a single MetaMask transaction. Every order lands on a real on-chain limit order book with automatic matching. A WebSocket-connected dashboard makes the system observable in real-time.
+Real-time autonomous trading demo on Somnia (chain 50312). Five system agents trade autonomously on-chain — four via Somnia's LLM consensus layer, one (noise_trader) via a fully on-chain mean-reversion rule. Any user can also deploy their own **composable user agent** via a single MetaMask transaction.
 
-System agents coordinate on-chain without any Python mediation: each agent's LLM prompt includes the previous cycle's decisions from all peers; consecutive wins scale order size automatically; three-agent consensus triggers a coalition order. Every prompt is emitted as the `context` field of `LLMRequestFired` — verifiable on the Somnia explorer.
-
-User agents participate in the same LLM pipeline. Ownership is enforced on-chain: `AgentRegistry.agents[agentId].agentOwner` maps to the registering wallet; `AgentRegistry.pauseAgent/resumeAgent` verify `msg.sender == agentOwner` before delegating to the coordinator. No backend intermediary is needed for pause/resume/fund after the initial `AgentRegistry.registerAgent()` transaction.
+All five agents share a **single coordinator pool** of synthetic tokens (`AgentCoordinator` holds the sETH and USDC). Each agent has a virtual token balance tracked on-chain via fill/cancel callbacks from `Exchange`. STT fees for Somnia platform calls are tracked per user wallet — all agents owned by the same address share one prepaid STT pool.
 
 ---
 
@@ -16,611 +14,273 @@ User agents participate in the same LLM pipeline. Ownership is enforced on-chain
 │                                                                       │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │  Exchange.sol  (real on-chain LOB)                           │    │
-│  │  placeOrder() → _matchOrder() → TradeExecuted(price,amount) │    │
-│  │  cancelOrder() · getOrdersByAgent() · getBestBid/Ask()      │    │
-│  └─────────────────────┬──────────────────────┬───────────────┘    │
-│                         │ placeOrder (callback)  │ events polled     │
-│  ┌──────────────────────┴──┐  ┌────────────────┴──────────────┐    │
-│  │ AgentRegistry · Treasury│  │  AgentCoordinator.sol          │    │
-│  └─────────────────────────┘  │  triggerAgentDecision() ×1     │    │
-│                                │  cancel lastOrderId → placeOrder│   │
-│                                │  MM: dual bid+ask per cycle    │    │
-│                                │  lastDecision → peer signals   │    │
-│                                │  winStreak → _orderAmount()    │    │
-│                                │  _coalitionCount==3 → 3× order │    │
-│                                │  _retrigger() → self-loop      │    │
-│                                └────────────────┬──────────────┘    │
-│  ┌─────────────────────────────────────         │ platform fires    │
-│  │  Somnia LLM Inference Agent        ──────────┘                  │
+│  │  placeOrderForAgent(isBuy, price, amount, agentId)          │    │
+│  │    → _matchOrder → TradeExecuted                            │    │
+│  │    → onAgentFill(agentId, isBuy, tokenFill, quoteFill)      │    │
+│  │  cancelOrder → onAgentCancel(agentId, isBuy, ...)            │    │
+│  └─────────────────────┬──────────────────────────────────────┘    │
+│                         │ coordinator is msg.sender for all orders   │
+│  ┌──────────────────────┴──────────────────────────────────────┐   │
+│  │  AgentCoordinator.sol  (shared pool + execution engine)      │   │
+│  │                                                              │   │
+│  │  agentTokenBalance[agentId]  agentQuoteBalance[agentId]      │   │
+│  │  userSttBalance[ownerAddress]   agentOwner[agentId]          │   │
+│  │                                                              │   │
+│  │  LLM agents:  trigger → price fetch → LLM → handleDecision  │   │
+│  │  Noise trader: trigger → price fetch → _executeRuleDecision  │   │
+│  │                                                              │   │
+│  │  winStreak, lastDecision, peer signals, coalition orders     │   │
+│  │  _retrigger() → self-loop                                    │   │
+│  └──────────────────────┬──────────────────────────────────────┘   │
+│                          │ reads config via IAgentRegistry           │
+│  ┌───────────────────────┴─────────────────────────────────────┐   │
+│  │  AgentRegistry.sol  (source of truth — all agents)           │   │
+│  │  registerAgent() · pauseAgent/resumeAgent · config getters   │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Somnia LLM Inference Agent                                   │   │
 │  │  inferString(ctx+peers+streak, systemPrompt, ["BUY","SELL","HOLD"])│
-│  │  → multi-validator consensus                                      │
-│  └──────────────────────────────────────────────────────────────┘   │
+│  └─────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
-     ↑ 1 startup tx per agent (6 gwei)  ↑ noise_trader direct orders
-┌────────┴─────────────────────────────────────────────────────────────┐
-│                         FastAPI Backend                               │
-│  ┌─────────────────┐  trade event poll (1s) ──► PriceEngine         │
-│  │ MarketStateBus  │  snapshot broadcast (3s) ──────────────────►WS │
-│  │ price · book    │  contract metrics poll (5s) ──► chain_metrics  │
-│  │ warnings·events │    extracts context+streak from events         │
-│  │                 │    coalition_alert broadcast on CoalitionFormed│
-│  └─────────────────┘  noise_trader_loop (4-6s) → Exchange.placeOrder│
-└──────────────────────────────┬───────────────────────────────────────┘
-                               │ WebSocket  ws://localhost:8000/ws
-┌──────────────────────────────▼───────────────────────────────────────┐
-│                    Next.js Dashboard                                  │
-│  LatencyHero (full-width: Somnia vs Solana vs Ethereum latency)      │
-│  CandlestickChart · OrderBook · AgentCards (5) · ActivityFeed        │
-│  Agent cards: strategy desc, 🔥 streak badge, position badge, P&L   │
-│  ReasoningPanel: live LLM prompt per agent (peers + streak visible)  │
-│  ActivityFeed: coalition alerts (orange) + tx hash links             │
-│  Scoreboard: ranked by total P&L (realized + unrealized)             │
-│  Zustand: marketStore · agentStore · feedStore · userStore           │
-└──────────────────────────────────────────────────────────────────────┘
+     ↑ 1 startup tx per agent  ↑ user registerAgent() from MetaMask
+┌────────┴──────────────────────────────────────────────────────────────┐
+│                         FastAPI Backend                                │
+│  trade event poll (1s) ──► PriceEngine ──► MarketStateBus            │
+│  snapshot broadcast (3s)                                              │
+│  contract metrics poll (5s) ──► chain_metrics                        │
+│    detects AgentRegistered → allocateToAgent → triggerAgentDecision  │
+│  token replenisher (30s) → tops up coordinator pool only             │
+└──────────────────────────────┬────────────────────────────────────────┘
+                               │ WebSocket
+┌──────────────────────────────▼────────────────────────────────────────┐
+│  Next.js Dashboard                                                    │
+│  System + user agent cards · Scoreboard · Chart · OrderBook           │
+│  MY AGENTS: Create (register + fund STT) / Pause / Resume            │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## MarketStateBus (`backend/market/state_bus.py`)
+## Per-Agent Virtual Balance Accounting
 
-The shared in-memory state layer. Protected by `asyncio.Lock` for safe concurrent access from multiple concurrent loops (4 on-chain agent polls + noise_trader loop + broadcast loops).
+All orders are placed by the coordinator contract as `msg.sender`. Individual agent wallets do not exist — instead each agent has virtual token balances within the coordinator's shared pool.
 
-Key methods:
+### At registration
 
-- `get_snapshot()` → price, bid/ask, spread, volume, order book (rebuilt from on-chain data), recent trades
-- `record_fill(price, volume, buyer_id, seller_id)` → anchors GBM to real on-chain fill, advances OHLCV builder
-- `set_order_book(bids, asks)` → rebuilds in-memory book from on-chain order data (called every 5s by metrics loop)
-- `inject_event(event_type, params)` → records a market event
-- `set_agent_warning(agent_id, warning)` / `clear_agent_warning(agent_id)` → warning state storage
+```
+allocateToAgent(agentId, ownerAddress, 10K sETH, 10K USDC)
+  → agentTokenBalance[agentId] = 10K sETH
+  → agentQuoteBalance[agentId] = 10K USDC
+  → agentOwner[agentId] = ownerAddress
+```
+
+### At order placement (handleDecision / _executeRuleDecision)
+
+```
+BUY order:
+  agentQuoteBalance[agentId] -= price * amount / 1e18   (USDC locked in Exchange)
+  placeOrderForAgent(true, price, amount, agentId)
+  → Exchange stores _orderAgentId[orderId] = agentId
+
+SELL order:
+  agentTokenBalance[agentId] -= amount   (sETH locked in Exchange)
+  placeOrderForAgent(false, price, amount, agentId)
+```
+
+### On fill (Exchange callback to coordinator)
+
+```
+onAgentFill(agentId, true, tokenFill, quoteFill):
+  agentTokenBalance[agentId] += tokenFill    (received sETH)
+  // USDC already deducted at placement
+
+onAgentFill(agentId, false, tokenFill, quoteFill):
+  agentQuoteBalance[agentId] += quoteFill    (received exact USDC from locked ratio)
+  // sETH already deducted at placement
+```
+
+### On cancel (Exchange callback to coordinator)
+
+```
+onAgentCancel(agentId, true, 0, remainingQuote):
+  agentQuoteBalance[agentId] += remainingQuote   (unfilled USDC returned)
+
+onAgentCancel(agentId, false, unfilledTokens, 0):
+  agentTokenBalance[agentId] += unfilledTokens   (unfilled sETH returned)
+```
+
+**Note:** `quoteFill` in `onAgentFill` is the exact USDC computed by Exchange (`lockedQuote * fill / totalAmount`), not `fillPrice * fill`. This avoids rounding discrepancies on partial fills.
 
 ---
 
-## Price Engine (`backend/market/price_engine.py`)
+## Per-User STT Accounting
 
-Simulates a realistic price series using **Geometric Brownian Motion (GBM)**:
+Each Somnia platform call costs one deposit of STT. `userSttBalance[ownerAddress]` tracks how much each user has prepaid. All agents owned by the same wallet share one balance.
+
+### Funding
 
 ```
-S(t+1) = S(t) × exp((μ - σ²/2)Δt + σ√Δt × Z)
-where Z ~ N(0,1)
+coordinator.fund() payable
+  → userSttBalance[msg.sender] += msg.value
+  → emit SttDeposited(msg.sender, msg.value)
 ```
 
-- `next_price()` → advances one tick (called every 1 second)
-- `apply_price_shock(pct)` → instantaneous price jump (used for whale/crash events)
-- `set_volatility_multiplier(multiplier, duration_seconds)` → temporary vol increase (auto-expires)
-- `set_chain_price(chain_price)` → anchors GBM to a real on-chain fill price; updates `self.price` and ticks the OHLCV builder
-- `OHLCVBuilder` → accumulates 1-second ticks into 5-second OHLCV bars
+Frontend `fundAgent()` calls `fund()` via MetaMask — `msg.sender` = user wallet = correct pool automatically.
 
-### Background loops
+### Deduction per cycle
 
-Four loops always run. The trade poll and metrics poll live in `backend/agents/metrics_collector.py`; the token replenisher in `backend/agents/token_replenisher.py`; the snapshot broadcast stays in the orchestrator.
+```
+triggerAgentDecision / _retrigger (JSON API call):
+  owner = agentOwner[agentId]
+  require(userSttBalance[owner] >= deposit * 2)   // reserve for JSON API + LLM
+  userSttBalance[owner] -= deposit
 
-**`MetricsCollector.run_trade_poll`** (1s interval)
+_fireLLMRequest (LLM call):
+  userSttBalance[agentOwner[agentId]] -= deposit
 
-Polls `Exchange.TradeExecuted` events. Each fill calls `state_bus.record_fill(price, volume)` to anchor the GBM price to real on-chain data and advances the OHLCV builder. Broadcasts `candle` WS messages when a 5s bar closes and updates the in-progress bar every poll.
+_executeRuleDecision (noise_trader, rule-based):
+  // only 1 deposit consumed (JSON API) — LLM call skipped
+```
 
-**`_snapshot_broadcast_loop`** (3s interval)
-
-Reads `MarketStateBus.get_snapshot()` and broadcasts a `market_snapshot` WS message to keep the dashboard fresh between fills.
-
-**`MetricsCollector.collect` via `_contract_metrics_poll_loop`** (5s interval)
-
-Reads on-chain contract state and emits a `chain_metrics` WS message. Also available at `GET /chain-metrics`. Tracks:
-
-| Source                                | Data collected                                                                                                                                                                                                                                                   |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AgentCoordinator` events             | Per-agent: `decisions_total`, `buy_count`, `sell_count`, `hold_count`, `failures`, `orders_placed` (from `DecisionExecuted.orderId`), `last_decision`, `last_price`, `last_fetched_price`, `last_context`, `win_streak`, `loop_stopped` + reason, `paused` state |
-| `AgentPaused` / `AgentResumed` events | Updates `orchestrator.paused_agents` set; `loop_stopped_any` ignores paused agents (normal shutdown vs real error)                                                                                                                                               |
-| `CoalitionFormed` events              | `coalition_alert` top-level field; also broadcast immediately as `{ type: "coalition_alert" }` WS message; inserted into `recent_fills` with `category: "coalition"`                                                                                             |
-| `AgentCoordinator.getBalance()`       | Coordinator STT fuel remaining                                                                                                                                                                                                                                   |
-| `AgentToken.balanceOf(coordinator)`   | sETH balance shown in agent cards — coordinator holds the shared pool for all 4 on-chain agents; noise_trader shows its own wallet balance                                                                                                                       |
-| `Exchange.getActiveBuys/Sells()`      | Live order book depth (buy count, sell count)                                                                                                                                                                                                                    |
-| `Exchange.getBestBid/Ask()`           | Live spread %                                                                                                                                                                                                                                                    |
-| `Exchange.OrderPlaced` events         | Orders placed count for noise_trader only (wallet-based) — on-chain agents are attributed via `DecisionExecuted`                                                                                                                                                 |
-| `Treasury.getBalance(addr)`           | Per-agent treasury STT balance                                                                                                                                                                                                                                   |
-| `Treasury.totalLocked()`              | Total STT held by treasury contract                                                                                                                                                                                                                              |
-
-The loop advances `from_block` after each poll so events are never double-counted.
-
-**`TokenReplenisher.run`** (30s interval)
-
-Polls QUOTE and AGT token balances for the coordinator and noise_trader, then auto-mints via `QuoteToken.mint()` when balances fall below 1,000 USDC. Running on its own slower loop cuts token-balance RPC calls by 6× compared to bundling them in the 5s metrics cycle.
-
-**Risk warning emission:** After updating the order book, `MetricsCollector._process_exchange_metrics` checks:
-
-- `spread_pct > 2.0` → broadcasts `risk_warning` of type `HIGH_SPREAD`
-- log-return stddev of recent closes > 2% → broadcasts `risk_warning` of type `VOLATILITY_SPIKE`
-
-These are immediate WebSocket broadcasts (not stored in `chain_metrics`).
+When `userSttBalance` drops below `deposit * 2`, the agent loop emits `LoopStopped(agentId, "Insufficient STT", balance)` and halts gracefully.
 
 ---
 
-## Blockchain Layer (`backend/blockchain/`)
+## Noise Trader — On-Chain Rule
 
-### `client.py` — Web3 singleton
+Noise-Bot is the only agent with an empty `systemPrompt` in `AgentRegistry`. The coordinator detects this in `handlePriceData` and routes to `_executeRuleDecision` instead of `_fireLLMRequest`:
 
-- One `Web3` instance shared across all agents
-- Per-wallet `asyncio.Lock`: each agent wallet has its own lock, preventing nonce conflicts when multiple agents submit transactions concurrently
-- Hardcoded `GAS_PRICE = 6_000_000_000` (6 gwei) — dynamic estimation (`eth_gasPrice`) causes failures on Somnia testnet
-- `send_transaction(private_key, to, data, value)`: builds tx, signs, broadcasts, waits up to 30s for receipt
+```
+if (bytes(IAgentRegistry(registry).getSystemPrompt(req.agentId)).length == 0) {
+    _executeRuleDecision(req.agentId, fetchedPrice);
+    return;
+}
+_fireLLMRequest(req.agentId, fetchedPrice);
+```
 
-### `abis.py` — ABI definitions
+**Rule (order-book balance):**
+- `getActiveSells().length > getActiveBuys().length` → BUY (asks outnumber bids — provide buy side)
+- `getActiveBuys().length > getActiveSells().length` → SELL (bids outnumber asks — provide sell side)
+- Balanced or no prior trades → `block.prevrandao % 2 == 0`
 
-Fallback ABIs for all six contracts in readable multiline format, used when no deployment JSON is present. Loaded automatically by `contracts.py` via `_load_abis()`.
+This guarantees noise bot always counterbalances the market: when all LLM agents cluster on SELL, asks pile up and noise bot flips to BUY immediately on its next cycle.
 
-### `contracts.py` — typed wrappers
-
-All six contract classes inherit `_BaseContract`, which provides:
-
-- `_call(fn, *, default, name)` — wraps every `run_in_executor` read pattern
-- `_tx(pk, fn_name, args)` — wraps `encode_abi` → `bytes.fromhex` → `send_transaction`
-
-Key methods per contract:
-
-- `ExchangeContract`: `place_order()`, `cancel_order()`, `get_best_bid/ask()`, `get_last_trade_price()`, `get_order_book()`, `get_order_book_depth()`, `get_recent_trade_events()`, `get_order_placed_events()`
-- `AgentCoordinatorContract`: `trigger_decision()`, `trigger_with_price()`, `get_balance()`, `pause_agent()`, `resume_agent()`, `get_coordinator_events()`, `get_decision_executed_events()`
-- `TreasuryContract`: `get_balance(addr)`, `get_total_locked()`
-- `QuoteTokenContract`: `get_balance(addr)`, `mint(owner_pk, to, amount)`
-- `AgentTokenContract`: `get_balance(addr)`, `mint(deployer_pk, to, amount)`
-- `AgentRegistryContract`: `get_all_agent_ids()`, `get_agent()`, `get_agent_registered_events()`, `set_active()` (dispatches to `pauseAgent`/`resumeAgent`)
-
-All methods are `async` and call through `client.send_transaction()`.
+This keeps the exchange price anchored to the oracle without LLM overhead. No Python involvement after the initial trigger.
 
 ---
 
-## Smart Contracts (`contracts/contracts/`)
-
-### `AgentToken.sol`
-
-Minimal owner-mintable ERC20 (symbol `sETH`, name `Somnia ETH`). Represents synthetic ETH on Somnia — the base asset being traded. No OpenZeppelin dependency. `deploy.js` mints 10M sETH to the coordinator (shared pool for all 4 on-chain agents) and grants Exchange a max allowance via `coordinator.approveToken()`. `seed.js` mints 1M sETH to each individual agent wallet and approves Exchange — required for noise_trader which calls Exchange directly.
-
-### `QuoteToken.sol`
-
-Minimal ERC20 (symbol `USDC`, name `USD Coin`) used as the payment currency in the sETH/USDC market. No OpenZeppelin dependency. Features a permissionless `faucet()` function that mints 10,000 USDC to any caller — testnet only. `deploy.js` mints 10M USDC to the coordinator and approves Exchange via `coordinator.approveToken()`. The orchestrator auto-replenishes coordinator and noise_trader USDC via `mint()` when balances fall below 1,000 USDC.
-
-### `Exchange.sol`
-
-Real on-chain limit order book with two-token settlement (sETH/USDC). Every `placeOrder()` call triggers the matching engine immediately. BUY orders lock USDC from the buyer; SELL orders lock sETH from the seller. On fill, the buyer receives sETH and the seller receives USDC. `lastTradePrice` is updated on every fill and used by `AgentCoordinator` as the base price for subsequent order cycles — this is how the exchange develops its own price through supply/demand rather than passively mirroring the ETH oracle.
+## Three-Step Agent Pipeline (LLM agents)
 
 ```
-placeOrder(bool isBuy, uint256 price, uint256 amount) → orderId
-  → for BUY  orders: quoteToken.transferFrom(msg.sender, Exchange, price*amount/1e18) — locks USDC
-  → for SELL orders: token.transferFrom(msg.sender, Exchange, amount)                 — locks sETH
-  → internally calls _matchOrder() which scans the opposite side for price crossings
-  → matching fills: _recordTrade() → token.transfer(buyer, fill) + quoteToken.transfer(seller, quote)
-  → unmatched remainder stays as an open resting order (tokens remain locked in Exchange)
-
-cancelOrder(uint256 orderId)
-  → for BUY  orders: quoteToken.transfer(order.agent, lockedQuote) — refunds unfilled USDC
-  → for SELL orders: token.transfer(order.agent, remaining)        — refunds unfilled sETH
-getBestBid() → (price, exists)
-getBestAsk() → (price, exists)
-getLastTradePrice() → uint256
-getActiveOrders() → uint256[]
-getActiveBuys() → uint256[]
-getActiveSells() → uint256[]
-
-Events:
-  OrderPlaced(orderId, agent, isBuy, price, amount)
-  OrderCancelled(orderId, agent)
-  OrderFilled(orderId, filledAmount, fullFill)
-  TradeExecuted(tradeId, buyOrderId, sellOrderId, buyer, seller, price, amount)
-```
-
-`_matchOrder()` does an O(n) scan of the opposite book. For buy orders: matches sells where `sell.price <= buy.price`. For sell orders: matches buys where `buy.price >= sell.price`. Maker price is used as the fill price. Partial fills are supported.
-
-### `AgentCoordinator.sol`
-
-Routes all 4 agents through Somnia's on-chain LLM inference agent. Self-re-triggers after every decision cycle — no Python involvement after the initial startup kick. Three features enable on-chain multi-agent coordination without any off-chain mediation.
-
-**Three-step pipeline per cycle:**
-
-```
-triggerAgentDecision(string agentId)       ← called once by Python on startup
-  → reads registry.getPriceConfig(agentId) → { priceUrl, selector, decimals }
-  → require(balance >= deposit × 2)
-  → platform.createRequest(jsonApiAgentId, handlePriceData.selector, fetchUint payload)
+triggerAgentDecision(agentId)   ← called once by Python at startup
+  check userSttBalance[owner] >= deposit * 2
+  deduct 1 deposit from userSttBalance[owner]
+  platform.createRequest{value: deposit}(jsonApiAgentId, handlePriceData.selector, fetchUint(...))
   → pendingPriceRequests[reqId] = PriceRequest(agentId, true)
-  → emit DecisionTriggered(requestId, agentId)
 
-handlePriceData(requestId, responses, ...)  ← Somnia JSON API agent callback
-  → fetchedPrice = abi.decode(responses[0].result, (uint256))
-  → context = _buildContext(fetchedPrice, agentId):
-      reads Exchange.getLastTradePrice(), getBestBid(), getBestAsk()
-      appends _buildPeerSignals(agentId)  →  "Peers: agent2=BUY,agent3=SELL"
-      appends streak info if winStreak[agentId] > 0
-  → platform.createRequest(llmAgentId, handleDecision.selector, inferString(context,...))
-  → emit LLMRequestFired(llmRequestId, agentId, fetchedPrice, context)
-  ↑ full prompt is on-chain in the event — verifiable on Somnia explorer
+handlePriceData(requestId, ...)   ← Somnia JSON API callback
+  fetchedPrice = abi.decode(...)
+  if systemPrompt empty → _executeRuleDecision(agentId, fetchedPrice) [noise trader]
+  else → _fireLLMRequest(agentId, fetchedPrice)
+    deduct 1 deposit from userSttBalance[agentOwner[agentId]]
+    context = _buildContext(fetchedPrice, agentId)
+      → reads Exchange.getLastTradePrice(), getBestBid/Ask()
+      → _buildPeerSignals() → "market_maker=BUY, momentum_trader=SELL"
+      → streak info if winStreak[agentId] > 0
+    platform.createRequest{value: deposit}(llmAgentId, handleDecision.selector,
+      inferString(context, systemPrompt, false, ["BUY","SELL","HOLD"]))
 
-handleDecision(requestId, responses, ...)   ← Somnia LLM validator consensus callback
-  → cancel lastOrderId[agentId] if set
-  → market_maker: places bid(−0.1%) + ask(+0.1%), emit 2× DecisionExecuted(streak=0), return
-  → directional agents:
-      decision = abi.decode(responses[0].result, (string))  → "BUY"/"SELL"/"HOLD"
-      lastDecision[agentId] = decision   ← peers read this next cycle
-      if BUY or SELL: _coalitionCount(decision) == 3? → _fireCoalitionOrder()
-      if HOLD: winStreak[agentId] = 0, emit DecisionExecuted(price=0, orderId=0, streak=0)
-      else: Exchange.placeOrder(isBuy, price, _orderAmount(agentId))
-              → success: winStreak[agentId]++; emit DecisionExecuted(..., streak)
-              → revert:  winStreak[agentId] = 0; emit DecisionFailed
-  → _retrigger(agentId)
-
-_retrigger(agentId) internal
-  → checks address(this).balance >= deposit × 2
-  → if funded: fires the next JSON API fetch → loop continues
-  → if underfunded: emit LoopStopped(agentId, "Insufficient balance", balance)
-  → if no config:   emit LoopStopped(agentId, "No agent config", balance)
-
-_orderAmount(agentId) internal view → ORDER_AMOUNT_BASE × (1 + winStreak/5), cap ORDER_AMOUNT_MAX
-_coalitionCount(direction) internal view → count of _agentIdList entries with lastDecision == direction
-_fireCoalitionOrder(isBuy, basePrice) → Exchange.placeOrder(isBuy, price, ORDER_AMOUNT_BASE×3)
-                                         emit CoalitionFormed(direction, 3, price, orderId)
-```
-
-Events:
-
-```
-DecisionTriggered(requestId, agentId)
-LLMRequestFired(llmRequestId, agentId, fetchedPrice, context)  ← NEW: full prompt on-chain
-DecisionExecuted(requestId, agentId, decision, price, orderId, streak)  ← NEW: streak field
-CoalitionFormed(direction, agentCount, price, orderId)  ← NEW: 3-agent consensus event
-DecisionFailed(requestId, agentId, reason)
-PriceFetchFailed(requestId, agentId)
-LoopStopped(agentId, reason, balance)   ← emitted when self-re-trigger cannot proceed
-```
-
-Platform address (testnet): `0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776`  
-Default `llmAgentId`: `2` (override via `SOMNIA_LLM_AGENT_ID` env var at deploy time)
-
-### `AgentRegistry.sol`
-
-Unified registry and source of truth for all agents — system (owned by deployer) and user-defined (owned by any wallet). Stores ownership, display metadata, and all agent configuration. The coordinator reads config from here via view getters on each decision cycle.
-
-```
-registerAgent(agentId, name, icon, riskLevel, systemPrompt, priceUrl, selector, decimals)
-  // anyone — msg.sender becomes agentOwner; emits AgentRegistered
-pauseAgent(string agentId)    // owner or agentOwner — delegates to coordinator
-resumeAgent(string agentId)   // owner or agentOwner — delegates to coordinator
-getSystemPrompt(string agentId) → string
-getPriceConfig(string agentId)  → (priceUrl, selector, decimals)
-getRiskLevel(string agentId)    → uint8
-getAllAgentIds()                 → string[]
-getAgentsByOwner(address)       → string[]
-isRegistered(string agentId)    → bool
-```
-
-### `Treasury.sol`
-
-Tracks per-agent STT balances. `allocate()` is owner-only, used by the system for simulated P&L tracking.
-
-```
-deposit() payable
-depositFor(address agent) payable
-withdraw(uint256 amount)
-getBalance(address agent) → uint256
-allocate(address from, address to, uint256 amount)  // owner-only
+handleDecision(requestId, ...)   ← Somnia LLM validator callback
+  cancel lastOrderId + lastBidOrderId (cancel-before-place)
+  market_maker: places bid(−0.1%) + ask(+0.1%) → return
+  directional agents:
+    decision = abi.decode(...) → "BUY" / "SELL" / "HOLD"
+    lastDecision[agentId] = decision  ← read by peers next cycle
+    _coalitionCount(decision) == 3 → _fireCoalitionOrder() (3× order)
+    deduct from agentTokenBalance / agentQuoteBalance
+    exchange.placeOrderForAgent(isBuy, price, amount, agentId)
+      → on fill: onAgentFill callback updates virtual balance
+      → on cancel: onAgentCancel callback restores locked balance
+    winStreak[agentId]++  or  = 0 on HOLD/fail
+  _retrigger(agentId)
+    check userSttBalance[agentOwner[agentId]] >= deposit * 2
+    deduct 1 deposit, fire next JSON API request → loop continues
+    OR emit LoopStopped if balance insufficient
 ```
 
 ---
 
-## Test Suite (`contracts/test/`)
+## Background Loops
 
-All contract tests run with Hardhat + Chai and use the `loadFixture` pattern from `@nomicfoundation/hardhat-network-helpers` for deterministic state resets between tests.
-
-```bash
-cd contracts && npx hardhat test
-```
-
-| File                        | Coverage                                                                                                                                                                                                |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Exchange.test.cjs`         | Order placement (BUY/SELL), sETH lock on SELL, matching engine (full and partial fills), `TradeExecuted` event fields, order cancellation with sETH/USDC refund, order book queries                     |
-| `AgentCoordinator.test.cjs` | Full 3-transaction pipeline (triggerAgentDecision → handlePriceData → handleDecision), coalition detection at 3-agent consensus, win streak counter, peer signal assembly, `LoopStopped` on low balance |
-| `AgentRegistry.test.cjs`    | Agent registration (name + strategy), owner-only `updateReputation`, reputation increment/decrement, `getAllAgents` return                                                                              |
-| `Treasury.test.cjs`         | `deposit()`, `depositFor(address)`, `withdraw()`, `getBalance()`, owner-only `allocate()`, revert on over-withdrawal                                                                                    |
-
-Each test file deploys a fresh fixture via `loadFixture` so tests are isolated from each other and from deployment state. `AgentCoordinator.test.cjs` deploys the full stack — `AgentToken`, `Exchange`, `MockPlatform`, and `AgentCoordinator` — and drives the callback loop using `MockPlatform.simulatePriceCallback` / `simulateLLMCallback`, the same mechanism the `platform-daemon.js` uses in local dev.
+| Loop | Interval | Responsibility |
+|------|----------|----------------|
+| `MetricsCollector.run_trade_poll` | 1s | Polls `TradeExecuted` events → anchors GBM price, builds OHLCV |
+| `_snapshot_broadcast_loop` | 3s | Pushes `market_snapshot` WS message |
+| `MetricsCollector.collect` | 5s | Reads coordinator events, Exchange state, P&L → `chain_metrics` WS |
+| `TokenReplenisher.run` | 30s | Polls coordinator pool balance → mints if below 1K tokens |
 
 ---
 
-## End-to-End Autonomous Agent Flow
+## Smart Contracts
 
-Complete flow from startup kick to self-perpetuating on-chain loop — three sequential transactions per cycle, all on Somnia chain 50312. Python fires Tx 1 **once per agent at startup**; after that the contract loops itself indefinitely.
+### Exchange.sol
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Python Backend (FastAPI)                                                     │
-│                                                                               │
-│  orchestrator.start_all() — once, at startup                                 │
-│    coordinator.trigger_decision(agent_pk, agent_id)  ← per agent, 1s apart  │
-│    ↓ signs + broadcasts tx (6 gwei)                                          │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │ Tx 1: triggerAgentDecision(agentId)
-                                       │ (fired ONCE per agent at startup)
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  AgentCoordinator.sol  (on Somnia chain 50312)                                │
-│                                                                               │
-│  triggerAgentDecision(agentId)                                               │
-│    · reads agentConfigs[agentId] → { priceUrl, selector, decimals }          │
-│    · require(balance >= deposit × 2)                                         │
-│    · payload = fetchUint(priceUrl, selector, decimals)                       │
-│    · platform.createRequest{value: deposit}(                                 │
-│        jsonApiAgentId,                                                       │
-│        address(this),                                                        │
-│        handlePriceData.selector,                                             │
-│        payload                                                               │
-│      )  → stores pendingPriceRequests[requestId]                             │
-│    · emit DecisionTriggered(requestId, agentId)                              │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │ request queued on Somnia platform
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Somnia JSON API Agent  (base agent, id = jsonApiAgentId)                    │
-│                                                                               │
-│  fetchUint(                                                                  │
-│    "https://api.coingecko.com/...?ids=ethereum&vs_currencies=usd",           │
-│    "ethereum.usd",                                                           │
-│    0    ← whole-dollar price, e.g. returns 3245 for $3245                   │
-│  )                                                                           │
-│  → makes HTTP request to CoinGecko                                          │
-│  → extracts integer field                                                    │
-│  → ABI-encodes result as uint256                                             │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │ Tx 2: handlePriceData(requestId, [3245], Success, ...)
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  AgentCoordinator.handlePriceData()  (callback, msg.sender == platform)      │
-│                                                                               │
-│  · fetchedPrice = abi.decode(responses[0].result, (uint256))  → 3245        │
-│  · _buildContext(3245, agentId):                                             │
-│      reads Exchange.getLastTradePrice() → lastFillUsd                       │
-│      reads Exchange.getBestBid()        → bidUsd                            │
-│      reads Exchange.getBestAsk()        → askUsd                            │
-│      _buildPeerSignals(agentId) → "arbitrage_agent=BUY,risk_manager=HOLD"  │
-│      winStreak[agentId] = 3 → "3-win streak. "                             │
-│      returns "ETH oracle: $3245. sETH last trade: $3244. Bid: $3243. Ask: $3245.   │
-│               Peers: arbitrage_agent=BUY,risk_manager=HOLD.                 │
-│               3-win streak. Decide: BUY, SELL, or HOLD."                   │
-│  · llmPayload = inferString(context, systemPrompts[agentId], false,         │
-│                              ["BUY","SELL","HOLD"])                          │
-│  · platform.createRequest{value: deposit}(                                  │
-│        llmAgentId,                                                          │
-│        address(this),                                                       │
-│        handleDecision.selector,                                             │
-│        llmPayload                                                           │
-│      )  → stores pendingLLMRequests[llmRequestId]                           │
-│  · emit LLMRequestFired(llmRequestId, agentId, 3245, context)               │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │ request queued on Somnia platform
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Somnia LLM Inference Agent  (base agent, id = llmAgentId)                  │
-│                                                                               │
-│  inferString(                                                                │
-│    prompt  = "ETH oracle: $3245. sETH last trade: $3244. ...",              │
-│    system  = registry.getSystemPrompt(agentId),  ← read from AgentRegistry    │
-│    cot     = false,                                                          │
-│    allowed = ["BUY","SELL","HOLD"]     ← constrains output to 3 values      │
-│  )                                                                           │
-│  → multi-validator consensus across Somnia's decentralized network          │
-│  → majority vote → "BUY" / "SELL" / "HOLD"                                 │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │ Tx 3: handleDecision(requestId, ["BUY"], Success, ...)
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  AgentCoordinator.handleDecision()   (callback, msg.sender == platform)      │
-│                                                                               │
-│  · cancel lastOrderId[agentId] if set (exchange.cancelOrder)                │
-│  · decision = abi.decode(responses[0].result, (string))  → "BUY"           │
-│  · lastDecision[agentId] = "BUY"    ← stored for peers next cycle           │
-│  · _coalitionCount("BUY") → 3?  → _fireCoalitionOrder(true, basePrice)     │
-│      exchange.placeOrder(true, price, ORDER_AMOUNT_BASE×3)                  │
-│      emit CoalitionFormed("BUY", 3, price, coalitionOrderId)                │
-│  · basePrice = hasTraded ? lastTradePrice : fetchedPrice × 1e18             │
-│       (on-chain sETH price when available; ETH oracle only for cold start)   │
-│  · orderPrice = basePrice × (10000 + 10) / 10000  ← +0.1% for buy         │
-│  · exchange.placeOrder(true, orderPrice, _orderAmount(agentId))             │
-│      _orderAmount = ORDER_AMOUNT_BASE × (1 + winStreak/5)  → 0.001e18      │
-│      → _matchOrder() scans sell book for crossing price                     │
-│      → if match: TradeExecuted(price, amount) emitted, lastTradePrice set   │
-│      → if no match: resting buy order added to book                         │
-│  · winStreak[agentId]++   → 4                                               │
-│  · emit DecisionExecuted(requestId, agentId, "BUY", orderPrice, orderId, 4) │
-│  · _retrigger(agentId)                                                       │
-│      → balance >= deposit × 2?                                               │
-│          YES → next cycle fires immediately (Tx 1 again on-chain)           │
-│               emit DecisionTriggered(newReqId, agentId)                     │
-│          NO  → emit LoopStopped(agentId, "Insufficient balance", balance)   │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+Real on-chain LOB. Key additions vs standard exchange:
 
-**Three transactions per cycle. Zero off-chain computation in the decision loop.** Python fires Tx 1 once per agent at startup. Txs 2 and 3 are fired entirely by Somnia's infrastructure. After Tx 3, `_retrigger()` fires the next cycle on-chain — the loop runs forever until the coordinator's STT balance is exhausted, at which point `LoopStopped(agentId, reason, balance)` is emitted.
+- `placeOrderForAgent(isBuy, price, amount, agentId)` — stores `_orderAgentId[orderId] = agentId`; triggers fill/cancel callbacks to coordinator
+- `IAgentFillCallback` interface — `onAgentFill(agentId, isBuy, tokenFill, quoteFill)` and `onAgentCancel(agentId, isBuy, unfilledTokens, remainingQuote)`
+- `quoteFill` in callbacks is computed from `_lockedQuote[buyId]` ratio, not from `fillPrice * fill` — ensures accounting accuracy on partial fills
+- `try/catch` on all callbacks — a failing callback never reverts the trade
+
+### AgentCoordinator.sol
+
+Execution engine — pure runtime state, reads all config from `AgentRegistry`.
+
+**State:**
+- `winStreak[agentId]`, `lastDecision[agentId]`, `agentPaused[agentId]`
+- `lastOrderId[agentId]`, `lastBidOrderId[agentId]`
+- `agentTokenBalance[agentId]`, `agentQuoteBalance[agentId]` — virtual pool shares
+- `userSttBalance[ownerAddress]` — prepaid STT per user wallet
+- `agentOwner[agentId]` — cached at `allocateToAgent` time
+
+**Functions:**
+- `allocateToAgent(agentId, owner, tokenAmt, quoteAmt)` — sets virtual balances + caches owner
+- `fund() payable` / `depositStt(forOwner) payable` — STT deposit
+- `getUserSttBalance(owner)` — view
+- `onAgentFill` / `onAgentCancel` — called by Exchange only
+- `_executeRuleDecision` — mean-reversion rule for noise_trader (no LLM)
+
+### AgentRegistry.sol
+
+Unified registry for all agents. `registerAgent()` is open to any wallet. `agentOwner` = `msg.sender`. `pauseAgent/resumeAgent` check `msg.sender == agentOwner`. Config stored here (`systemPrompt`, `priceUrl`, `selector`, `decimals`, `riskLevel`); coordinator reads via view getters each cycle.
 
 ---
 
-## Somnia Agent Protocol
+## WebSocket Messages
 
-How the self-perpetuating on-chain loop works. Python fires the first trigger once per agent; after that the contract drives itself.
-
-```
-Python backend (once at startup per agent)
-  │
-  └─ coordinator.trigger_decision(agent_pk, agent_id)
-       │ signs + sends tx: AgentCoordinator.triggerAgentDecision(agentId)
-       │
-       ▼
-AgentCoordinator.triggerAgentDecision(agentId)
-  · reads agentConfigs[agentId] → { priceUrl, selector, decimals }
-  · require(balance >= deposit × 2)
-  · platform.createRequest{value: deposit}(jsonApiAgentId, handlePriceData.selector,
-      fetchUint(priceUrl, selector, decimals))
-  · emit DecisionTriggered(requestId, agentId)
-       │
-       ▼  (Somnia JSON API agent fetches price off-chain)
-AgentCoordinator.handlePriceData(requestId, responses, ...)  ← platform callback
-  · fetchedPrice = abi.decode(responses[0].result, (uint256))
-  · _buildContext(fetchedPrice, agentId) — reads Exchange.sol on-chain
-  · platform.createRequest{value: deposit}(llmAgentId, handleDecision.selector,
-      inferString(context, registry.getSystemPrompt(agentId), false, ["BUY","SELL","HOLD"]))
-  · emit LLMRequestFired(llmRequestId, agentId, fetchedPrice)
-       │
-       ▼  (Somnia LLM Inference Agent — multi-validator consensus)
-AgentCoordinator.handleDecision(requestId, responses, ...)   ← platform callback
-  · cancel lastOrderId[agentId] if set
-  · decision = abi.decode(responses[0].result, (string))  → "BUY" / "SELL" / "HOLD"
-  · lastDecision[agentId] = decision    ← peers read this next cycle
-  · _coalitionCount(decision) == 3?  → _fireCoalitionOrder(), emit CoalitionFormed
-  · BUY:  price = basePrice × 1.001  → Exchange.placeOrder(true,  price, _orderAmount(agentId))
-  · SELL: price = basePrice × 0.999  → Exchange.placeOrder(false, price, _orderAmount(agentId))
-  · HOLD: winStreak[agentId] = 0; no order placed
-  · on fill: winStreak[agentId]++; emit DecisionExecuted(..., streak)
-  · on fail: winStreak[agentId] = 0; emit DecisionFailed
-  · _retrigger(agentId)
-       │
-       ▼  (self-re-trigger — no Python needed)
-  balance >= deposit × 2?
-    YES → platform.createRequest(jsonApiAgentId, ...) → back to handlePriceData
-          emit DecisionTriggered(newReqId, agentId)
-    NO  → emit LoopStopped(agentId, "Insufficient balance", balance)
-```
-
-**`allowedValues`**: constraining LLM output to `["BUY","SELL","HOLD"]` ensures the callback can deterministically parse the response without JSON extraction or fallback logic.
-
-**Deposit**: each cycle consumes 2 deposits — one for the JSON API fetch and one for the LLM inference. `deploy.js` pre-funds the coordinator with 0.05 STT. Top up via `fund()`. When balance drops below `deposit × 2`, `LoopStopped` is emitted and the agent halts gracefully.
-
-**Per-agent system prompts**: stored in `AgentRegistry.agents[agentId].systemPrompt`. Each agent's strategy is set during `registerAgent()` — deployer sets system agents at deploy time, users set their own when calling from the frontend. The coordinator reads via `registry.getSystemPrompt(agentId)` on each LLM request.
-
----
-
-## WebSocket Message Protocol
-
-### Backend → Frontend
-
-| `type`            | Frequency             | Key fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ----------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `market_snapshot` | every 3s              | `price`, `bid`, `ask`, `spread_pct`, `volume_24h`, `order_book` (top 10 levels), `recent_trades` (last 50, each with `buyer_agent`/`seller_agent`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `candle`          | every 5s (bar close)  | `time`, `open`, `high`, `low`, `close`, `volume`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `chain_metrics`   | every 5s              | `coordinator_balance`, `total_locked`, `spread_pct`, `buy_depth`, `sell_depth`, `loop_stopped_any`, `coalition_alert` (last `CoalitionFormed` event or null), `recent_fills` (each with `tx_hash`, coalition fills have `category: "coalition"`), `somnia_block_ms`; nested `agents` map with per-agent: `decisions_total`, `buy_count`, `sell_count`, `hold_count`, `failures`, `orders_placed`, `treasury_balance`, `last_decision`, `last_price`, `last_fetched_price`, `last_context` (full LLM prompt), `win_streak`, `last_order_id`, `loop_stopped`, `loop_stopped_reason`, `trade_pnl`, `total_buy_volume`, `total_sell_volume`, `avg_decision_latency_ms`, `net_position`, `unrealized_pnl`, `wallet_address` |
-| `coalition_alert` | on `CoalitionFormed`  | `direction` (`BUY`/`SELL`), `agent_count` (3), `price`, `order_id`, `block`, `timestamp` — broadcast immediately, not batched with 5s metrics cycle                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `risk_warning`    | on threshold breach   | `from_agent`, `severity` (`HIGH`/`MEDIUM`), `warning_type` (`HIGH_SPREAD`/`VOLATILITY_SPIKE`), `message`, `timestamp`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `event_injected`  | on event button click | `event_type`, `description`, `price_before`, `price_after`, `timestamp`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-
-### Frontend → Backend
-
-```json
-{ "type": "inject_event", "data": { "event_type": "whale_buy" } }
-```
-
-Event types: `whale_buy`, `whale_sell`, `volatility_spike`, `news_event`, `flash_crash`
-
-### HTTP Endpoints
-
-| Method | Path                  | Auth       | Response                                                                            |
-| ------ | --------------------- | ---------- | ----------------------------------------------------------------------------------- |
-| `GET`  | `/health`             | —          | `{ status, agents_running, ws_connections }`                                        |
-| `GET`  | `/state`              | —          | Full market snapshot                                                                |
-| `GET`  | `/agents`             | —          | Array of 5 agent state summaries from `chain_metrics`                               |
-| `GET`  | `/chain-metrics`      | —          | Latest `chain_metrics` snapshot (coordinator balance, per-agent on-chain stats)     |
-| `POST` | `/events/inject`      | —          | `{ event_type }` → triggers event (simulated only, no blockchain call)              |
-| `POST` | `/agents/trigger`     | —          | Re-fires `triggerAgentDecision()` for all 4 on-chain agents — use if loops stalled  |
-| `GET`  | `/debug/config`       | —          | Non-sensitive config values + whether `AgentCoordinator` is initialized             |
-| `POST` | `/agents/{id}/pause`  | admin_auth | Calls `pauseAgent(agentId)` on-chain; loop stops at next `_retrigger()`             |
-| `POST` | `/agents/{id}/resume` | admin_auth | Calls `resumeAgent(agentId)` then re-fires `triggerAgentDecision()` to restart loop |
-| `POST` | `/agents/pause-all`   | admin_auth | Pauses all 4 on-chain system agents                                                 |
-| `POST` | `/agents/resume-all`  | admin_auth | Resumes all 4 on-chain system agents and restarts each loop                         |
-| `POST` | `/agents/{id}/fund`   | admin_auth | Body: `{ amount: float }` — mints sETH to the agent                                 |
-| `POST` | `/agents/fund-all`    | admin_auth | Body: `{ amount: float }` — mints sETH to all on-chain agents                       |
-| `GET`  | `/user/agents`        | —          | Query: `?address=0x...` — returns cached user agents for that wallet + live metrics |
-
-**User agent controls (no backend involved):** `pauseAgent` and `resumeAgent` are called on `AgentRegistry` via MetaMask (ownership verified there); `fund()` is called directly on `AgentCoordinator`. Ownership enforced by `AgentRegistry.agents[agentId].agentOwner`.
-
-**`admin_auth`** dependency (`api/auth.py`): reads `X-Admin-Sig`, `X-Admin-Message`, `X-Admin-Address` HTTP headers. Verifies `personal_sign(message, address)` where `message = "admin:<action>:<unix_timestamp>"`. Signer must match `deployer_address` (derived from `DEPLOYER_PRIVATE_KEY` at startup). Requests older than 5 minutes are rejected.
-
----
-
-## Frontend State (`frontend/store/`)
-
-### `marketStore`
-
-- `candles`: ring buffer (max 200) of OHLCV bars
-- `orderBook`: `{ bids: Level[], asks: Level[] }` (top 10 each)
-- `recentTrades`: last 50 trades
-- `currentPrice`, `isConnected`
-
-### `userStore`
-
-- `walletAddress: string | null` — connected MetaMask wallet address; written by `Header` on connect, read by `page.tsx` to gate the MY AGENTS tab and pass to `MyAgentsPanel`
-
-### `agentStore`
-
-- `agents: Record<string, AgentState>` — latest state for all tracked agents (system + user); updated on every `chain_metrics` message
-- `decisionHistory: Record<agent_id, string[]>` — last 20 `"BUY @ $3245"` entries per agent, derived from `chain_metrics` diffs
-- `coordinatorBalance`, `totalLocked`, `loopStoppedAny`, `recentFills`, `somniaBlockMs` — top-level metrics from `chain_metrics`
-- Per-agent fields include: `last_context` (full LLM prompt from `LLMRequestFired.context`), `win_streak` (from `DecisionExecuted.streak`), `net_position`, `unrealized_pnl`, `wallet_address`
-
-`AgentScoreboard` (`components/agents/AgentScoreboard.tsx`) ranks all 5 agents by `trade_pnl + unrealized_pnl` in real-time and displays buy/sell volume and avg decision latency (`avg_decision_latency_ms`).
-
-`AgentCard` displays a `🔥 N` streak badge next to the agent name when `win_streak > 0`, pulsing with an amber border. The tooltip shows the current order size multiplier. `ReasoningPanel` shows the live `last_context` string above the decision history — every cycle judges can read the exact peer signals the agent received.
-
-### `feedStore`
-
-- `items: ActivityFeedItem[]` — ring buffer (max 100, newest first)
-
----
-
-## Agent Coordination — Risk Manager & Risk Warnings
-
-```
-Risk-Shield (risk_manager agent, on-chain)
-  ↓ AgentCoordinator fires LLM request via Somnia platform
-  ↓ _contract_metrics_poll_loop (5s) computes spread + volatility from on-chain data:
-      If spread_pct > 2.0%:
-        broadcast risk_warning { warning_type: "HIGH_SPREAD", severity: HIGH/MEDIUM }
-      If log-return stddev of recent closes > 2%:
-        broadcast risk_warning { warning_type: "VOLATILITY_SPIKE" }
-
-MM-Prime / Momentum-Alpha / Arb-Scanner
-  ↓ AgentCoordinator sends market context to Somnia LLM
-  ↓ Somnia validators factor the context (spread, last price, best bid/ask) into BUY/SELL/HOLD
-```
-
-`risk_warning` messages are immediate WebSocket broadcasts, independent of the `chain_metrics` 5s cycle.
+| `type` | Frequency | Key fields |
+|--------|-----------|------------|
+| `market_snapshot` | 3s | `price`, `bid`, `ask`, `spread_pct`, `order_book`, `recent_trades` |
+| `candle` | 5s (bar close) | `time`, `open`, `high`, `low`, `close`, `volume` |
+| `chain_metrics` | 5s | `coordinator_balance`, per-agent `agentTokenBalance`/`agentQuoteBalance`/`userSttBalance`, `win_streak`, `last_decision`, `trade_pnl`, `unrealized_pnl`, `loop_stopped` |
+| `coalition_alert` | on `CoalitionFormed` | `direction`, `agent_count`, `price`, `order_id` |
+| `risk_warning` | on threshold | `warning_type`, `severity`, `message` |
 
 ---
 
 ## Key Design Decisions
 
-| Decision                                                   | Reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
-| **Two-token sETH/USDC settlement**                         | Exchange locks USDC on BUY placement and sETH on SELL placement. On fill, buyer receives sETH and seller receives USDC — both transfers are atomic in `_recordTrade()`. P&L is provable on the Somnia explorer. Coordinator holds 10M sETH + 10M USDC; orchestrator auto-replenishes USDC via `QuoteToken.mint()` when balance drops below 1,000 USDC.                                                                                                                                                                                                                                                                                                               |
-| **Self-re-triggering contract**                            | `handleDecision()` calls `_retrigger()` to fire the next cycle — agents run forever with zero Python involvement after startup. Emits `LoopStopped` on low balance for graceful halt.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| **One startup kick per agent**                             | Python's only blockchain interaction. The orchestrator fires `triggerAgentDecision()` once per agent with 1s stagger, then never touches the contracts again.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| **Cancel-before-place (`lastOrderId` + `lastBidOrderId`)** | `AgentCoordinator` tracks the most recent ASK orderId (`lastOrderId`) and BID orderId (`lastBidOrderId`) per agent. Both are cancelled at the start of each cycle before new orders are placed. Cancelling BUY orders returns locked USDC to the coordinator; cancelling SELL orders returns locked sETH. Prevents resting-order bloat over long demo sessions.                                                                                                                                                                                                                                                                                                      |
-| **Market Maker dual-sided quoting**                        | MM-Prime short-circuits the LLM decision and places both a bid (−0.1%) and an ask (+0.1%) per cycle, properly acting as a liquidity provider rather than a directional trader.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **Peer signals in LLM context (`lastDecision`)**           | Every agent's LLM prompt includes what every other directional agent decided last cycle, assembled in `_buildPeerSignals()` from the `lastDecision` mapping. The full prompt is emitted in `LLMRequestFired.context` — on-chain verifiable inter-agent communication. Market Maker returns before `lastDecision` is written so it stays non-directional.                                                                                                                                                                                                                                                                                                             |
-| **Win streak → adaptive order sizing**                     | `winStreak[agentId]` increments on each filled order and resets on HOLD or failed `placeOrder`. `_orderAmount()` returns `ORDER_AMOUNT_BASE × (1 + streak/5)`, capped at 5×. Entirely on-chain — no Python configuration change needed. Streak is emitted as the 6th field of `DecisionExecuted` and shown as a live badge on the dashboard.                                                                                                                                                                                                                                                                                                                         |
-| **Coalition orders at 3-agent consensus**                  | `_coalitionCount(direction)` checks `lastDecision` for all registered agents. When exactly 3 agree (momentum, arbitrage, risk_manager), `_fireCoalitionOrder()` places a single 3× order and emits `CoalitionFormed`. Using `== 3` (not `>= 3`) ensures it fires exactly once per convergence event. Backend broadcasts `coalition_alert` immediately without waiting for the 5s metrics poll.                                                                                                                                                                                                                                                                       |
-| **Noise trader as Python coroutine**                       | Random orders don't benefit from LLM overhead. `_noise_trader_loop` runs every 4–6s and places orders directly via `ExchangeContract.place_order()`, keeping the book alive between LLM cycles without consuming coordinator STT.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Noise trader trades both directions**                    | The noise trader calls Exchange directly with `random.choice([True, False])` for order side. `deploy-local.js` mints 10,000 sETH + 10M USDC to the noise trader wallet and approves Exchange for both. USDC auto-replenishment applies to noise_trader too — orchestrator mints USDC when balance drops below 1,000 USDC.                                                                                                                                                                                                                                                                                                                                            |
-| **Deployer key exclusive to daemon**                       | `platform-daemon.js` wraps the deployer wallet in `ethers.NonceManager`, tracking nonces in-memory. Any other process sending txs from the same key (e.g. Python registry writes) silently advances the on-chain nonce past the daemon's cache, causing "nonce too low" on every queued callback. Registry write operations (`incrementTrades`, `updateReputation`) were removed from the Python orchestrator to keep the deployer key exclusive to the daemon.                                                                                                                                                                                                      |
-| **Dedicated contract metrics poll loop**                   | Backend observes the on-chain loop via event polling rather than driving it. Gives the dashboard real per-agent stats (decisions, BUY/SELL split, fuel remaining) without coupling Python to the trading cycle.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| **`from_block` advancement in metrics loop**               | Each poll advances `from_block` past the last seen block so coordinator and exchange events are never double-counted across poll cycles.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| **Net position & unrealized P&L**                          | `MetricsCollector._record_pnl_from_trade` updates `net_position` per agent (buyer +amount, seller −amount); `MetricsCollector._process_exchange_metrics` marks to market using `current_price`. Frontend scoreboard sorts by `trade_pnl + unrealized_pnl`.                                                                                                                                                                                                                                                                                                                                                                                                           |
-| **`_is_address()` guard on contract init**                 | Validates addresses against `r"0x[0-9a-fA-F]{40}"` before instantiating contracts — handles unconfigured `.env` without crashing at startup.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| **`_load_local_deployment()`**                             | On startup, reads `contracts/deployments/somnia-local.json` and injects contract addresses + agent PKs into `settings`. When `SOMNIA_RPC_URL` points to `127.0.0.1` or `localhost`, the local JSON **always** takes precedence — this prevents stale-but-real-looking `.env` addresses from bypassing the override guard after a redeploy. On testnet the guard only fires for exact placeholder values. Enables zero-config local dev: deploy with `deploy-local.js`, start with `./start.sh`, done.                                                                                                                                                                |
-| **Hardcoded 6 gwei gas price**                             | Dynamic `eth_gasPrice` RPC returns unreliable values on Somnia testnet and causes tx failures.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **Per-wallet `asyncio.Lock`**                              | Concurrent startup triggers (1s stagger) would cause nonce conflicts without exclusive access per wallet.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| **GBM price engine, not real feed**                        | Demo needs controllable events (whale buy, crash) — replaced by on-chain prices once fills arrive.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| **On-chain price discovery**                               | `AgentCoordinator.handleDecision()` uses `exchange.getLastTradePrice()` as `basePrice` when `exchange.hasTraded()` is true, falling back to the ETH/USD oracle only for cold start. This means agent buy/sell pressure moves the sETH price: filled asks raise it, filled bids lower it. The arb and risk agents contain mean-reversion logic referencing ETH oracle vs sETH last trade price — they act as gravity pulling sETH back toward fair value.                                                                                                                                                                                                             |     |
-| **Ring buffers in frontend (max 200/100)**                 | Prevents memory growth during extended demo sessions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| **`series.update()` only for chart**                       | Calling `setData()` repeatedly on TradingView v5 causes visible flicker and memory leaks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| **`key={fillCount}` animation restart**                    | `LatencyHero` passes a counter as `key` to the animated latency number — React remounts the element on each fill, restarting the CSS `animate-pulse` as a visual "new trade settled" pop.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| **`_order_to_agent` dict for trade attribution**           | `AgentCoordinator` is `msg.sender` for all `Exchange.placeOrder()` calls — individual agent wallets never appear in `OrderPlaced.agent`. `DecisionExecuted` carries both `agentId` and `orderId`, so the backend builds `{order_id → agent_id}` from these events and uses it as fallback when the wallet lookup fails. This gives on-chain agents correct order counts and P&L attribution.                                                                                                                                                                                                                                                                         |
-| **`DecisionExecuted` poll in 1s trade loop**               | `DecisionExecuted` and `TradeExecuted` can fire in the same block (placeOrder auto-matches). The 5s metrics loop hasn't processed `DecisionExecuted` yet when the 1s trade loop tries to attribute a trade. `get_decision_executed_events()` (targeted single-event poll) runs at the top of every 1s iteration to keep `_order_to_agent` current before trade processing.                                                                                                                                                                                                                                                                                           |
-| **sETH balance from coordinator**                          | On-chain agents hold no sETH in individual wallets — the coordinator holds a shared 10M pool approved for Exchange. The backend polls `AgentToken.balanceOf(coordinator_address)` and shows that number for all 4 on-chain agents. Noise_trader shows its own wallet balance (individual 10K sETH from `deploy-local.js`).                                                                                                                                                                                                                                                                                                                                           |
-| **`pauseAgent`/`resumeAgent` for STT conservation**        | `_retrigger()` checks `agentPaused[agentId]` on-chain before consuming a deposit. When paused it emits `LoopStopped(agentId, "paused", ...)` and returns without spending STT. Python observes `AgentPaused` events and updates `orchestrator.paused_agents` so the watchdog doesn't re-trigger. `loop_stopped_any` ignores "paused" reasons so the UI warning only fires for genuine fund exhaustion.                                                                                                                                                                                                                                                               |
-| **Wallet signature auth for admin endpoints**              | `personal_sign(message, address)` with a timestamped message means MetaMask prompts the user visibly, the signature is tied to the deployer key, and replayed signatures expire after 5 minutes. The deployer address is derived server-side from `DEPLOYER_PRIVATE_KEY` — not stored separately in env. Frontend admin controls only appear when the connected wallet address matches `NEXT_PUBLIC_DEPLOYER_ADDRESS`.                                                                                                                                                                                                                                               |
-| **Composable user agents — fully trustless**               | `AgentRegistry.registerAgent()` is `external` with no access restriction — anyone can call it; `msg.sender` becomes `agentOwner`. The registry stores all config (systemPrompt, priceConfig, riskLevel) and calls `coordinator.addAgentToList()` to register the agent for peer-signal iteration. `AgentRegistry.pauseAgent/resumeAgent` verify `msg.sender == agentOwner` before calling coordinator. `fund()` on the coordinator has no access restriction. The backend only fires the initial `triggerAgentDecision()` kick and provides the `GET /user/agents` read endpoint — it holds no user keys and is not required for any post-registration control flow. |
-| **Event-driven user agent discovery**                      | The orchestrator polls `AgentRegistered` events from `AgentRegistry` on each metrics cycle. When a new event is detected, `_on_user_agent_registered()` persists the record to `backend/data/user_agents.json`, registers the agent in the orchestrator's in-memory state, and fires `triggerAgentDecision()`. On restart, `_reload_user_agents_from_db()` restores state from the JSON cache without re-triggering. The chain is always the authoritative source; the JSON cache is a fast read-through for `GET /user/agents`.                                                                                                                                     |
-| **Config ownership in AgentRegistry**                      | Agent configuration (systemPrompt, priceUrl/selector/decimals, riskLevel) is owned by `AgentRegistry` and exposed via view getters (`getSystemPrompt`, `getPriceConfig`, `getRiskLevel`). The coordinator reads these on every decision cycle via `IAgentRegistry(registry)` external calls. This keeps `AgentCoordinator` as a pure execution engine — it stores only runtime state (`winStreak`, `lastDecision`, `agentPaused`, `_agentIdList`). No `setAgentConfig` or `setSystemPrompt` functions exist on the coordinator; all config changes go through the registry.                                                                                          |
-| **No per-agent wallets for user agents**                   | System agents each have an individual wallet that signs transactions and pays gas. User agents do not — all orders are placed by `AgentCoordinator` as `msg.sender` regardless of which agent ID triggered them. This means no private key is generated or stored for user agents. The deployer key provides gas for `triggerAgentDecision()` (unrestricted) and the watchdog retriggers. Users fund the shared coordinator STT balance via `fund()` rather than an individual wallet.                                                                                                                                                                               |
+| Decision | Reason |
+|----------|--------|
+| **All agents share coordinator pool** | Users can't manage 5+ EOA wallets. Virtual balance accounting gives isolation without per-agent keys. |
+| **agentOwner cached in coordinator** | Avoids a registry cross-call on every `_retrigger` cycle. Set once at `allocateToAgent` time. |
+| **Per-user STT pool (not per-agent)** | A user with 3 agents shouldn't need to fund each separately. One wallet → one STT pool covering all owned agents. |
+| **fund() tracks msg.sender** | Frontend calls `fund()` from user wallet — `msg.sender` = user address = correct pool owner automatically. |
+| **quoteFill from locked ratio** | Exchange computes `lockedQuote * fill / totalAmount` — not `fillPrice * fill`. This is the actual USDC the seller receives; using the ratio prevents virtual balance drift on partial fills. |
+| **Empty systemPrompt = rule-based** | No new mapping needed. Noise-bot registered with `systemPrompt = ""`. Coordinator detects this in `handlePriceData`. |
+| **Noise-bot order-book balance rule** | LLMs aren't random — a prompt can't produce true noise. Mean-reversion against oracle failed in practice: when all LLM agents SELL, the exchange price drops with the oracle (correlated), so the condition never flips. Order-book depth comparison is more robust: when sells outnumber bids, noise bot BUYs unconditionally regardless of price level. |
+| **UUPS proxies for all 6 contracts** | Deploy once to testnet, upgrade implementations without changing addresses or losing state. |
+| **Self-re-triggering contract** | `_retrigger()` fires the next cycle on-chain after every decision. Python fires one tx per agent at startup. Zero off-chain computation in the decision loop thereafter. |
+| **Cancel-before-place** | `lastOrderId` + `lastBidOrderId` per agent. Both cancelled before each new cycle — prevents resting-order bloat in long demo sessions. |
+| **6 gwei hardcoded gas** | Dynamic `eth_gasPrice` causes tx failures on Somnia testnet. |
+| **_order_to_agent in backend** | `AgentCoordinator` is `msg.sender` for all Exchange orders — individual agents never appear in `OrderPlaced.agent`. `DecisionExecuted` carries both `agentId` and `orderId`, so backend builds `{order_id → agent_id}` for trade attribution. |

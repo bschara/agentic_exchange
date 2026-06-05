@@ -49,6 +49,7 @@ export interface UserAgentRecord {
 export interface AgentState {
   agent_id: string;
   agent_name: string;
+  icon?: string;
   decisions_total: number;
   buy_count: number;
   sell_count: number;
@@ -136,7 +137,7 @@ export interface EventInjected {
   timestamp: number;
 }
 
-export type AgentStatus = 'ACTIVE' | 'WAITING' | 'STOPPED';
+export type AgentStatus = 'ACTIVE' | 'WAITING' | 'STARTING' | 'STOPPED';
 
 export type WSMessage =
   | { type: 'market_snapshot'; data: MarketSnapshot; timestamp: number }
