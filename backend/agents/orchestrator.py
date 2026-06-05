@@ -109,8 +109,6 @@ class AgentOrchestrator:
 
         self._wallet_to_id: dict[str, str] = {}
 
-        self._reload_user_agents_from_db()
-
         # Sub-components (created after agents dict is populated)
         self._watchdog: Optional[AgentWatchdog] = None
         self._metrics_collector = MetricsCollector(
@@ -296,29 +294,6 @@ class AgentOrchestrator:
 
     # ── User agent support ────────────────────────────────────────────────────
 
-    def _reload_user_agents_from_db(self) -> None:
-        try:
-            from agents.user_agents_db import UserAgentsDB
-            for record in UserAgentsDB().load():
-                agent_id = record["agent_id"]
-                if agent_id in self.agents:
-                    continue
-                self.agents[agent_id] = {
-                    "agent_id":      agent_id,
-                    "agent_name":    record.get("name", agent_id),
-                    "wallet_address": "",
-                    "owner_address": record.get("owner_address", ""),
-                    "icon":          record.get("icon", "🤖"),
-                    "risk_level":    record.get("risk_level", 3),
-                    "is_user_agent": True,
-                }
-                entry = empty_agent_metrics(agent_id)
-                entry["agent_name"] = record.get("name", agent_id)
-                self._chain_metrics["agents"][agent_id] = entry
-                logger.info(f"Reloaded user agent from DB: {agent_id}")
-        except Exception as e:
-            logger.warning(f"_reload_user_agents_from_db failed: {e}")
-
     async def _ensure_user_agent_setup(self, agent_id: str, owner: str) -> None:
         """Allocate capital, fund STT, and fire a trigger for a user agent if not yet done."""
         if not self._coordinator:
@@ -369,12 +344,6 @@ class AgentOrchestrator:
     async def _on_user_agent_registered(
         self, agent_id: str, owner: str, name: str, icon: str = "🤖", risk_level: int = 3
     ) -> None:
-        try:
-            from agents.user_agents_db import UserAgentsDB
-            UserAgentsDB().upsert_from_event(agent_id, owner, name, icon, risk_level)
-        except Exception as e:
-            logger.warning(f"Could not persist user agent {agent_id}: {e}")
-
         if agent_id not in self.agents:
             self.agents[agent_id] = {
                 "agent_id":      agent_id,

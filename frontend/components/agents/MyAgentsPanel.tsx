@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Plus, RefreshCw } from 'lucide-react';
+import { Plus, RefreshCw, Zap } from 'lucide-react';
 import { useUserAgents } from '@/hooks/useUserAgents';
 import { UserAgentCard } from './UserAgentCard';
 import { CreateAgentModal } from './CreateAgentModal';
@@ -11,10 +11,11 @@ interface Props {
 }
 
 export function MyAgentsPanel({ walletAddress }: Props) {
-  const { agents, loading, createAgent, pauseAgent, resumeAgent, fundAgent, refetch } =
+  const { agents, sttBalance, loading, createAgent, pauseAgent, resumeAgent, fundAgent, refetch, refreshSttBalance } =
     useUserAgents(walletAddress);
   const [showModal, setShowModal] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [topping, setTopping] = useState(false);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -58,6 +59,36 @@ export function MyAgentsPanel({ walletAddress }: Props) {
           </button>
         </div>
       </div>
+
+      {/* STT Pool banner */}
+      {agents.length > 0 && (
+        <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-black/30 border border-violet-500/20">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-gray-500 uppercase tracking-widest">⛽ STT Pool</span>
+            <span className={`text-xs font-mono font-bold ${
+              sttBalance > 0.5 ? 'text-emerald-400' :
+              sttBalance > 0.1 ? 'text-amber-400' : 'text-red-400'
+            }`}>
+              {sttBalance.toFixed(4)} STT
+            </span>
+            {sttBalance < 0.1 && (
+              <span className="text-[9px] font-bold text-red-400 animate-pulse">⚠ LOW</span>
+            )}
+          </div>
+          <button
+            onClick={async () => {
+              setTopping(true);
+              try { await fundAgent(0.5); } catch { /* handled in hook */ }
+              setTopping(false);
+            }}
+            disabled={topping}
+            className="flex items-center gap-1 px-2 py-1 text-[10px] font-bold border border-violet-500/40 text-violet-400 rounded bg-violet-500/10 hover:bg-violet-500/20 disabled:opacity-40 transition-all"
+          >
+            <Zap className="w-3 h-3" />
+            {topping ? '...' : '+ 0.5 STT'}
+          </button>
+        </div>
+      )}
 
       {/* Agent list */}
       {loading && agents.length === 0 ? (

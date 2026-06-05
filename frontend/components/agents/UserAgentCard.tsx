@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { UserAgentRecord, AgentState, AgentStatus } from '@/lib/types';
 import { AgentStatusBadge } from './AgentStatusBadge';
-import { PauseCircle, PlayCircle, Coins } from 'lucide-react';
+import { PauseCircle, PlayCircle } from 'lucide-react';
 
 const DECISION_COLORS: Record<string, string> = {
   BUY:  'text-emerald-400',
@@ -29,7 +29,6 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
   const m = agent.metrics;
   const status = agentStatus(m);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [fundAmount, setFundAmount] = useState('0.1');
   const [txMsg, setTxMsg] = useState<string | null>(null);
 
   const total      = m?.decisions_total || 1;
@@ -162,23 +161,17 @@ export function UserAgentCard({ agent, onPause, onResume, onFund }: Props) {
           </button>
         )}
         <div className="flex items-center gap-1 ml-auto">
-          <input
-            type="number"
-            min="0.001"
-            step="0.01"
-            value={fundAmount}
-            onChange={(e) => setFundAmount(e.target.value)}
-            className="w-14 px-1.5 py-1 text-[10px] font-mono bg-black/40 border border-white/10 rounded text-white text-center"
-          />
-          <span className="text-[10px] text-gray-600">STT</span>
-          <button
-            onClick={() => handle('fund', () => onFund(parseFloat(fundAmount) || 0.1))}
-            disabled={!!actionLoading}
-            className="flex items-center gap-1 px-2 py-1 text-[10px] font-bold border border-blue-500/40 text-blue-400 rounded bg-blue-500/10 hover:bg-blue-500/20 disabled:opacity-40 transition-all"
-          >
-            <Coins className="w-3 h-3" />
-            {actionLoading === 'fund' ? '...' : 'FUND'}
-          </button>
+          {([0.1, 0.5, 1.0] as const).map((amt) => (
+            <button
+              key={amt}
+              onClick={() => handle(`fund_${amt}`, () => onFund(amt))}
+              disabled={!!actionLoading}
+              className="px-2 py-1 text-[10px] font-mono font-bold border border-violet-500/30 text-violet-300 rounded bg-violet-500/10 hover:bg-violet-500/20 disabled:opacity-40 transition-all"
+            >
+              {actionLoading === `fund_${amt}` ? '...' : `+${amt}`}
+            </button>
+          ))}
+          <span className="text-[9px] text-gray-600 ml-0.5">STT</span>
         </div>
       </div>
 
