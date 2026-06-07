@@ -4,6 +4,17 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Optional network switch ───────────────────────────────────────────────────
+NETWORK=${1:-}
+if [[ "$NETWORK" == "testnet" || "$NETWORK" == "localhost" ]]; then
+  cp "$ROOT/backend/.env.$NETWORK"        "$ROOT/backend/.env"
+  cp "$ROOT/frontend/.env.local.$NETWORK" "$ROOT/frontend/.env.local"
+  echo "Network: $NETWORK"
+elif [[ -n "$NETWORK" ]]; then
+  echo "Usage: $0 [testnet|localhost]"
+  exit 1
+fi
+
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║         AGENTIC EXCHANGE STARTUP         ║"
