@@ -1,172 +1,28 @@
 {
-  "chainId": 31337,
-  "network": "localhost",
-  "deployedAt": "2026-06-05T18:19:03.051Z",
-  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "chainId": 50312,
+  "deployedAt": "2026-06-07T13:34:21.169Z",
+  "deployer": "0xB84E32D418E85C70036357D4A7495E69C9A39c06",
   "contracts": {
-    "MockPlatform": {
-      "address": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
-    },
     "AgentToken": {
-      "address": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
+      "address": "0xCA16ADC2dE37147fd21645Aa60CB6b1Ca2F92d4e"
     },
     "QuoteToken": {
-      "address": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+      "address": "0x8352EfcD1AC5f5A6BcDA298C13542BB5e1Fbb901"
     },
     "Exchange": {
-      "address": "0x0165878A594ca255338adfa4d48449f69242Eb8F"
-    },
-    "Treasury": {
-      "address": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6"
-    },
-    "AgentCoordinator": {
-      "address": "0x610178dA211FEF7D417bC0e6FeD39F05609AD788"
+      "address": "0x366D1Ef2bA37615f1001D1C573a17A4aa985bC84"
     },
     "AgentRegistry": {
-      "address": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0"
+      "address": "0x1D99aE7a58B557ab059Bb8CF781B35C9E037EB23"
+    },
+    "Treasury": {
+      "address": "0x6CeCA3CedcfCa87A3e82C51F2792770276C329aC"
+    },
+    "AgentCoordinator": {
+      "address": "0xABc9C71b23CA8Db12D4b8860720c72a7A427AF03"
     }
   },
   "abis": {
-    "MockPlatform": [
-      {
-        "anonymous": false,
-        "inputs": [
-          {
-            "indexed": true,
-            "internalType": "uint256",
-            "name": "requestId",
-            "type": "uint256"
-          },
-          {
-            "indexed": false,
-            "internalType": "uint256",
-            "name": "agentId",
-            "type": "uint256"
-          },
-          {
-            "indexed": true,
-            "internalType": "address",
-            "name": "callbackAddress",
-            "type": "address"
-          },
-          {
-            "indexed": false,
-            "internalType": "bytes4",
-            "name": "callbackSelector",
-            "type": "bytes4"
-          }
-        ],
-        "name": "RequestCreated",
-        "type": "event"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "uint256",
-            "name": "agentId",
-            "type": "uint256"
-          },
-          {
-            "internalType": "address",
-            "name": "callbackAddress",
-            "type": "address"
-          },
-          {
-            "internalType": "bytes4",
-            "name": "callbackSelector",
-            "type": "bytes4"
-          },
-          {
-            "internalType": "bytes",
-            "name": "",
-            "type": "bytes"
-          }
-        ],
-        "name": "createRequest",
-        "outputs": [
-          {
-            "internalType": "uint256",
-            "name": "requestId",
-            "type": "uint256"
-          }
-        ],
-        "stateMutability": "payable",
-        "type": "function"
-      },
-      {
-        "inputs": [],
-        "name": "getRequestDeposit",
-        "outputs": [
-          {
-            "internalType": "uint256",
-            "name": "",
-            "type": "uint256"
-          }
-        ],
-        "stateMutability": "pure",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "uint256",
-            "name": "",
-            "type": "uint256"
-          }
-        ],
-        "name": "requests",
-        "outputs": [
-          {
-            "internalType": "address",
-            "name": "callbackAddress",
-            "type": "address"
-          },
-          {
-            "internalType": "bytes4",
-            "name": "callbackSelector",
-            "type": "bytes4"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "uint256",
-            "name": "requestId",
-            "type": "uint256"
-          },
-          {
-            "internalType": "string",
-            "name": "decision",
-            "type": "string"
-          }
-        ],
-        "name": "simulateLLMCallback",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "uint256",
-            "name": "requestId",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "fetchedPrice",
-            "type": "uint256"
-          }
-        ],
-        "name": "simulatePriceCallback",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-      }
-    ],
     "AgentToken": [
       {
         "inputs": [],
@@ -1780,6 +1636,558 @@
         "type": "function"
       }
     ],
+    "AgentRegistry": [
+      {
+        "inputs": [],
+        "stateMutability": "nonpayable",
+        "type": "constructor"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "target",
+            "type": "address"
+          }
+        ],
+        "name": "AddressEmptyCode",
+        "type": "error"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "implementation",
+            "type": "address"
+          }
+        ],
+        "name": "ERC1967InvalidImplementation",
+        "type": "error"
+      },
+      {
+        "inputs": [],
+        "name": "ERC1967NonPayable",
+        "type": "error"
+      },
+      {
+        "inputs": [],
+        "name": "FailedCall",
+        "type": "error"
+      },
+      {
+        "inputs": [],
+        "name": "InvalidInitialization",
+        "type": "error"
+      },
+      {
+        "inputs": [],
+        "name": "NotInitializing",
+        "type": "error"
+      },
+      {
+        "inputs": [],
+        "name": "UUPSUnauthorizedCallContext",
+        "type": "error"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "bytes32",
+            "name": "slot",
+            "type": "bytes32"
+          }
+        ],
+        "name": "UUPSUnsupportedProxiableUUID",
+        "type": "error"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "caller",
+            "type": "address"
+          }
+        ],
+        "name": "AgentPaused",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "agentOwner",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "string",
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "indexed": false,
+            "internalType": "string",
+            "name": "icon",
+            "type": "string"
+          },
+          {
+            "indexed": false,
+            "internalType": "uint8",
+            "name": "riskLevel",
+            "type": "uint8"
+          }
+        ],
+        "name": "AgentRegistered",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "caller",
+            "type": "address"
+          }
+        ],
+        "name": "AgentResumed",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": false,
+            "internalType": "uint64",
+            "name": "version",
+            "type": "uint64"
+          }
+        ],
+        "name": "Initialized",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "implementation",
+            "type": "address"
+          }
+        ],
+        "name": "Upgraded",
+        "type": "event"
+      },
+      {
+        "inputs": [],
+        "name": "UPGRADE_INTERFACE_VERSION",
+        "outputs": [
+          {
+            "internalType": "string",
+            "name": "",
+            "type": "string"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "",
+            "type": "string"
+          }
+        ],
+        "name": "agents",
+        "outputs": [
+          {
+            "internalType": "address",
+            "name": "agentOwner",
+            "type": "address"
+          },
+          {
+            "internalType": "string",
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "icon",
+            "type": "string"
+          },
+          {
+            "internalType": "uint8",
+            "name": "riskLevel",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint256",
+            "name": "createdAt",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "active",
+            "type": "bool"
+          },
+          {
+            "internalType": "string",
+            "name": "systemPrompt",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "priceUrl",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "selector",
+            "type": "string"
+          },
+          {
+            "internalType": "uint8",
+            "name": "decimals",
+            "type": "uint8"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "coordinator",
+        "outputs": [
+          {
+            "internalType": "address",
+            "name": "",
+            "type": "address"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "_owner",
+            "type": "address"
+          }
+        ],
+        "name": "getAgentsByOwner",
+        "outputs": [
+          {
+            "internalType": "string[]",
+            "name": "",
+            "type": "string[]"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "getAllAgentIds",
+        "outputs": [
+          {
+            "internalType": "string[]",
+            "name": "",
+            "type": "string[]"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "getPriceConfig",
+        "outputs": [
+          {
+            "internalType": "string",
+            "name": "priceUrl",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "selector",
+            "type": "string"
+          },
+          {
+            "internalType": "uint8",
+            "name": "decimals",
+            "type": "uint8"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "getRiskLevel",
+        "outputs": [
+          {
+            "internalType": "uint8",
+            "name": "",
+            "type": "uint8"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "getSystemPrompt",
+        "outputs": [
+          {
+            "internalType": "string",
+            "name": "",
+            "type": "string"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "_owner",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "_coordinator",
+            "type": "address"
+          }
+        ],
+        "name": "initialize",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "isRegistered",
+        "outputs": [
+          {
+            "internalType": "bool",
+            "name": "",
+            "type": "bool"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "owner",
+        "outputs": [
+          {
+            "internalType": "address",
+            "name": "",
+            "type": "address"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "",
+            "type": "uint256"
+          }
+        ],
+        "name": "ownerAgents",
+        "outputs": [
+          {
+            "internalType": "string",
+            "name": "",
+            "type": "string"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "pauseAgent",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "proxiableUUID",
+        "outputs": [
+          {
+            "internalType": "bytes32",
+            "name": "",
+            "type": "bytes32"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "icon",
+            "type": "string"
+          },
+          {
+            "internalType": "uint8",
+            "name": "riskLevel",
+            "type": "uint8"
+          },
+          {
+            "internalType": "string",
+            "name": "systemPrompt",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "priceUrl",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "selector",
+            "type": "string"
+          },
+          {
+            "internalType": "uint8",
+            "name": "decimals",
+            "type": "uint8"
+          }
+        ],
+        "name": "registerAgent",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          }
+        ],
+        "name": "resumeAgent",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "agentId",
+            "type": "string"
+          },
+          {
+            "internalType": "bool",
+            "name": "active",
+            "type": "bool"
+          }
+        ],
+        "name": "setActive",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "address",
+            "name": "newImplementation",
+            "type": "address"
+          },
+          {
+            "internalType": "bytes",
+            "name": "data",
+            "type": "bytes"
+          }
+        ],
+        "name": "upgradeToAndCall",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function"
+      }
+    ],
     "Treasury": [
       {
         "inputs": [],
@@ -3314,558 +3722,12 @@
         "stateMutability": "payable",
         "type": "receive"
       }
-    ],
-    "AgentRegistry": [
-      {
-        "inputs": [],
-        "stateMutability": "nonpayable",
-        "type": "constructor"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "address",
-            "name": "target",
-            "type": "address"
-          }
-        ],
-        "name": "AddressEmptyCode",
-        "type": "error"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "address",
-            "name": "implementation",
-            "type": "address"
-          }
-        ],
-        "name": "ERC1967InvalidImplementation",
-        "type": "error"
-      },
-      {
-        "inputs": [],
-        "name": "ERC1967NonPayable",
-        "type": "error"
-      },
-      {
-        "inputs": [],
-        "name": "FailedCall",
-        "type": "error"
-      },
-      {
-        "inputs": [],
-        "name": "InvalidInitialization",
-        "type": "error"
-      },
-      {
-        "inputs": [],
-        "name": "NotInitializing",
-        "type": "error"
-      },
-      {
-        "inputs": [],
-        "name": "UUPSUnauthorizedCallContext",
-        "type": "error"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "bytes32",
-            "name": "slot",
-            "type": "bytes32"
-          }
-        ],
-        "name": "UUPSUnsupportedProxiableUUID",
-        "type": "error"
-      },
-      {
-        "anonymous": false,
-        "inputs": [
-          {
-            "indexed": true,
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          },
-          {
-            "indexed": true,
-            "internalType": "address",
-            "name": "caller",
-            "type": "address"
-          }
-        ],
-        "name": "AgentPaused",
-        "type": "event"
-      },
-      {
-        "anonymous": false,
-        "inputs": [
-          {
-            "indexed": true,
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          },
-          {
-            "indexed": true,
-            "internalType": "address",
-            "name": "agentOwner",
-            "type": "address"
-          },
-          {
-            "indexed": false,
-            "internalType": "string",
-            "name": "name",
-            "type": "string"
-          },
-          {
-            "indexed": false,
-            "internalType": "string",
-            "name": "icon",
-            "type": "string"
-          },
-          {
-            "indexed": false,
-            "internalType": "uint8",
-            "name": "riskLevel",
-            "type": "uint8"
-          }
-        ],
-        "name": "AgentRegistered",
-        "type": "event"
-      },
-      {
-        "anonymous": false,
-        "inputs": [
-          {
-            "indexed": true,
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          },
-          {
-            "indexed": true,
-            "internalType": "address",
-            "name": "caller",
-            "type": "address"
-          }
-        ],
-        "name": "AgentResumed",
-        "type": "event"
-      },
-      {
-        "anonymous": false,
-        "inputs": [
-          {
-            "indexed": false,
-            "internalType": "uint64",
-            "name": "version",
-            "type": "uint64"
-          }
-        ],
-        "name": "Initialized",
-        "type": "event"
-      },
-      {
-        "anonymous": false,
-        "inputs": [
-          {
-            "indexed": true,
-            "internalType": "address",
-            "name": "implementation",
-            "type": "address"
-          }
-        ],
-        "name": "Upgraded",
-        "type": "event"
-      },
-      {
-        "inputs": [],
-        "name": "UPGRADE_INTERFACE_VERSION",
-        "outputs": [
-          {
-            "internalType": "string",
-            "name": "",
-            "type": "string"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "",
-            "type": "string"
-          }
-        ],
-        "name": "agents",
-        "outputs": [
-          {
-            "internalType": "address",
-            "name": "agentOwner",
-            "type": "address"
-          },
-          {
-            "internalType": "string",
-            "name": "name",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "icon",
-            "type": "string"
-          },
-          {
-            "internalType": "uint8",
-            "name": "riskLevel",
-            "type": "uint8"
-          },
-          {
-            "internalType": "uint256",
-            "name": "createdAt",
-            "type": "uint256"
-          },
-          {
-            "internalType": "bool",
-            "name": "active",
-            "type": "bool"
-          },
-          {
-            "internalType": "string",
-            "name": "systemPrompt",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "priceUrl",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "selector",
-            "type": "string"
-          },
-          {
-            "internalType": "uint8",
-            "name": "decimals",
-            "type": "uint8"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [],
-        "name": "coordinator",
-        "outputs": [
-          {
-            "internalType": "address",
-            "name": "",
-            "type": "address"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "address",
-            "name": "_owner",
-            "type": "address"
-          }
-        ],
-        "name": "getAgentsByOwner",
-        "outputs": [
-          {
-            "internalType": "string[]",
-            "name": "",
-            "type": "string[]"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [],
-        "name": "getAllAgentIds",
-        "outputs": [
-          {
-            "internalType": "string[]",
-            "name": "",
-            "type": "string[]"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          }
-        ],
-        "name": "getPriceConfig",
-        "outputs": [
-          {
-            "internalType": "string",
-            "name": "priceUrl",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "selector",
-            "type": "string"
-          },
-          {
-            "internalType": "uint8",
-            "name": "decimals",
-            "type": "uint8"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          }
-        ],
-        "name": "getRiskLevel",
-        "outputs": [
-          {
-            "internalType": "uint8",
-            "name": "",
-            "type": "uint8"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          }
-        ],
-        "name": "getSystemPrompt",
-        "outputs": [
-          {
-            "internalType": "string",
-            "name": "",
-            "type": "string"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "address",
-            "name": "_owner",
-            "type": "address"
-          },
-          {
-            "internalType": "address",
-            "name": "_coordinator",
-            "type": "address"
-          }
-        ],
-        "name": "initialize",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          }
-        ],
-        "name": "isRegistered",
-        "outputs": [
-          {
-            "internalType": "bool",
-            "name": "",
-            "type": "bool"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [],
-        "name": "owner",
-        "outputs": [
-          {
-            "internalType": "address",
-            "name": "",
-            "type": "address"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "address",
-            "name": "",
-            "type": "address"
-          },
-          {
-            "internalType": "uint256",
-            "name": "",
-            "type": "uint256"
-          }
-        ],
-        "name": "ownerAgents",
-        "outputs": [
-          {
-            "internalType": "string",
-            "name": "",
-            "type": "string"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          }
-        ],
-        "name": "pauseAgent",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-      },
-      {
-        "inputs": [],
-        "name": "proxiableUUID",
-        "outputs": [
-          {
-            "internalType": "bytes32",
-            "name": "",
-            "type": "bytes32"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "name",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "icon",
-            "type": "string"
-          },
-          {
-            "internalType": "uint8",
-            "name": "riskLevel",
-            "type": "uint8"
-          },
-          {
-            "internalType": "string",
-            "name": "systemPrompt",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "priceUrl",
-            "type": "string"
-          },
-          {
-            "internalType": "string",
-            "name": "selector",
-            "type": "string"
-          },
-          {
-            "internalType": "uint8",
-            "name": "decimals",
-            "type": "uint8"
-          }
-        ],
-        "name": "registerAgent",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          }
-        ],
-        "name": "resumeAgent",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "string",
-            "name": "agentId",
-            "type": "string"
-          },
-          {
-            "internalType": "bool",
-            "name": "active",
-            "type": "bool"
-          }
-        ],
-        "name": "setActive",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "address",
-            "name": "newImplementation",
-            "type": "address"
-          },
-          {
-            "internalType": "bytes",
-            "name": "data",
-            "type": "bytes"
-          }
-        ],
-        "name": "upgradeToAndCall",
-        "outputs": [],
-        "stateMutability": "payable",
-        "type": "function"
-      }
     ]
+  },
+  "meta": {
+    "somniaPlatform": "0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776",
+    "llmAgentId": "2",
+    "jsonApiAgentId": "1",
+    "priceUrl": "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
   }
 }
